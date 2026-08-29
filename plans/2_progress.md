@@ -1,7 +1,7 @@
 # Task 2 Progress: Docker, MinIO, SQLite infrastructure
 
-**Last updated:** 2026-08-29 ~09:30 UTC+8 (session handoff)
-**Status:** All files from the plan are implemented. Two runtime failures remain before the verification sequence can pass. **Not committed yet.**
+**Last updated:** 2026-08-29 ~19:25 UTC+8 (review fix)
+**Status:** **COMPLETE.** Committed as `83ef7dc` ("Add Docker, MinIO, and SQLite infrastructure (Task 2)"). Post-commit review found one bug — the verify script's existing-stack guard used the wrong Docker label (`compose_project` instead of `com.docker.compose.project`), so it could not detect an existing Task 2 stack. Fixed in `scripts/verify-container-stack.sh` (line 37 + comment), re-ran the full verification to green (`ALL CHECKS PASSED`), and positively proved the guard now refuses when a container for the project name exists (started a `minio` container under `pos-doc-task2-test`, script exited 1 with the refusal message, then tore the test stack down). The two smaller review observations (SQLite `ApplicationReadyEvent` PRAGMA timing comment; tests closing Spring-managed `DataSource` while the context stays cached) are noted as follow-ups and intentionally not changed.
 
 ---
 

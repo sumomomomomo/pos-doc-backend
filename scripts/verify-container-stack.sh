@@ -12,7 +12,8 @@ set -eu
 
 PROJECT_NAME="pos-doc-task2-test"
 # The plan mandates the fixed project name. The refusal check below filters on
-# label compose_project=${PROJECT_NAME}, so the actual project must equal that
+# label com.docker.compose.project=${PROJECT_NAME} (the label Docker Compose
+# actually stamps on its containers), so the actual project must equal that
 # fixed name for the guarantee to hold (a per-PID suffix would defeat it).
 STACK_ID="${PROJECT_NAME}"
 ENV_FILE=""
@@ -34,7 +35,7 @@ command -v curl >/dev/null 2>&1 || {
 
 # --- refuse to reuse an existing stack ---------------------------------------
 
-EXISTING="$(docker ps -a --filter "label=compose_project=${PROJECT_NAME}" --format '{{.Names}}' | head -n 1 || true)"
+EXISTING="$(docker ps -a --filter "label=com.docker.compose.project=${PROJECT_NAME}" --format '{{.Names}}' | head -n 1 || true)"
 if [ -n "${EXISTING}" ]; then
     echo "ERROR: a container for compose project '${PROJECT_NAME}' already exists (${EXISTING})." >&2
     echo "Refusing to start over an existing stack; run its own cleanup first." >&2
