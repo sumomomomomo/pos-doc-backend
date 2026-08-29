@@ -264,7 +264,7 @@ components:
       type: string
       minLength: 1
       maxLength: 256
-      pattern: '.*\\S.*'
+      pattern: '.*\S.*'
       description: Unique policy number after server-side normalization.
       examples: ['P12345678']
 
@@ -272,7 +272,7 @@ components:
       type: string
       minLength: 1
       maxLength: 256
-      pattern: '.*\\S.*'
+      pattern: '.*\S.*'
       description: Unique eRef number derived from the source archive filename.
       examples: ['EREF-2026-00123']
 
@@ -439,12 +439,12 @@ components:
           type: string
           minLength: 1
           maxLength: 256
-          pattern: '.*\\S.*'
+          pattern: '.*\S.*'
         consultantName:
           type: string
           minLength: 1
           maxLength: 256
-          pattern: '.*\\S.*'
+          pattern: '.*\S.*'
         policyCreateDate:
           type: string
           format: date
@@ -461,7 +461,7 @@ components:
           type: string
           minLength: 1
           maxLength: 256
-          pattern: '.*\\S.*'
+          pattern: '.*\S.*'
         fuzzyName:
           type: boolean
           default: true

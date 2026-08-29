@@ -2,6 +2,12 @@ spring:
   application:
     name: pos-doc-backend
 
+  # TODO: skeleton only - no database is configured yet; remove this exclusion
+  # when PostgreSQL and JPA are introduced.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+
 server:
   servlet:
     context-path: /api/v1

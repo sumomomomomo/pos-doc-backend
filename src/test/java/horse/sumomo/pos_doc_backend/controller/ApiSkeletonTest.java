@@ -47,12 +47,9 @@ class ApiSkeletonTest {
         MockMultipartFile file = new MockMultipartFile("file", "dummy.zip", "application/zip",
                 new byte[] {1, 2, 3, 4});
 
-        // The generated @Pattern(".*\\\\S.*") on policyNumber (from the OpenAPI
-        // pattern '.*\\S.*') requires a literal backslash+S sequence, so the
-        // dummy value contains one.
         mockMvc.perform(multipart("/pos-records")
                         .file(file)
-                        .param("policyNumber", "POLICY-UPLOAD-\\S001"))
+                        .param("policyNumber", "POLICY-UPLOAD-001"))
                 .andExpect(status().isAccepted())
                 .andExpect(header().string("Location", FIXED_LOCATION))
                 .andExpect(jsonPath("$.posRecordId").value(FIXED_POS_RECORD_ID))
@@ -95,7 +92,7 @@ class ApiSkeletonTest {
 
         mockMvc.perform(patch("/pos-records/{id}", pathId)
                         .contentType(MediaType.parseMediaType("application/merge-patch+json"))
-                        .content("{\"expectedVersion\":1,\"policyCreateDate\":\"2026-02-01\"}"))
+                        .content("{\"expectedVersion\":1,\"policyNumber\":\"POLICY-PATCH-001\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(pathId))
                 .andExpect(jsonPath("$.version").value(1));
