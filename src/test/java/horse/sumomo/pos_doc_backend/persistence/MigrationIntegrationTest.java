@@ -33,7 +33,8 @@ class MigrationIntegrationTest {
 			"storage_object",
 			"pos_record",
 			"pos_document",
-			"ingestion_job");
+			"ingestion_job",
+			"outbox_event");
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
@@ -48,7 +49,7 @@ class MigrationIntegrationTest {
 	}
 
 	@Test
-	void flywayHistoryContainsExactlyOneSuccessfulMigrationVersion1() {
+	void flywayHistoryContainsExactlyTheSuccessfulMigrationsVersion1And2() {
 		Boolean historyExists = this.jdbcTemplate.queryForObject(
 				"SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'flyway_schema_history'",
 				Boolean.class);
@@ -57,11 +58,12 @@ class MigrationIntegrationTest {
 		List<Integer> successfulVersions = this.jdbcTemplate.query(
 				"SELECT version FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank",
 				(rs, rowNum) -> rs.getInt(1));
-		assertEquals(List.of(1), successfulVersions, "exactly migration version 1 must be successful");
+		assertEquals(List.of(1, 2), successfulVersions,
+				"exactly migration versions 1 and 2 must be successful");
 	}
 
 	@Test
-	void exactlyTheFourBusinessTablesExistAndHibernateAddedNone() {
+	void allFlywayTablesExistAndHibernateAddedNone() {
 		Set<String> tables = tableNames();
 		assertEquals(EXPECTED_TABLES, tables,
 				"the database must contain exactly the Flyway schema; Hibernate must not add business tables");

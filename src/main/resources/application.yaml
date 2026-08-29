@@ -2,6 +2,11 @@ spring:
   application:
     name: pos-doc-backend
 
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 11MB
+
   datasource:
     url: ${SQLITE_URL:jdbc:sqlite:./pos-doc.db}
     driver-class-name: org.sqlite.JDBC
@@ -23,6 +28,16 @@ spring:
     locations: classpath:db/migration
     clean-disabled: true
 
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:local-dev-rabbit}
+    password: ${RABBITMQ_PASSWORD:local-dev-rabbit-secret-change-me}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+
 server:
   servlet:
     context-path: /api/v1
@@ -40,6 +55,27 @@ storage:
     access-key: ${MINIO_ACCESS_KEY:local-dev-access}
     secret-key: ${MINIO_SECRET_KEY:local-dev-secret-change-me}
     bucket: ${MINIO_BUCKET:pos-documents}
+
+app:
+  upload:
+    max-compressed-bytes: 10485760
+    max-uncompressed-bytes: 262144000
+    max-entry-bytes: 52428800
+    max-file-entries: 100
+    max-compression-ratio: 100
+  messaging:
+    outbox:
+      enabled: ${OUTBOX_RELAY_ENABLED:true}
+      fixed-delay-ms: 1000
+      batch-size: 20
+      confirm-timeout-ms: 5000
+    topology:
+      exchange: pos.ingestion
+      routing-key: ingestion.requested
+      queue: pos.ingestion.jobs
+      dead-letter-exchange: pos.ingestion.dlx
+      dead-letter-routing-key: ingestion.dead
+      dead-letter-queue: pos.ingestion.dead
 
 management:
   endpoints:

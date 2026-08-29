@@ -1,15 +1,28 @@
 package horse.sumomo.pos_doc_backend.controller;
 
-import horse.sumomo.pos_doc_backend.service.DummyIngestionJobService;
-import horse.sumomo.pos_doc_backend.service.DummyPosRecordService;
+import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
+import horse.sumomo.pos_doc_backend.ingestion.application.UploadResult;
+import horse.sumomo.pos_doc_backend.persistence.entity.IngestionJobEntity;
+import horse.sumomo.pos_doc_backend.persistence.entity.PosRecordEntity;
+import horse.sumomo.pos_doc_backend.persistence.model.JobStatus;
+import horse.sumomo.pos_doc_backend.persistence.repository.IngestionJobRepository;
+import horse.sumomo.pos_doc_backend.service.DummyIngestionJobService;
+import horse.sumomo.pos_doc_backend.service.DummyPosRecordService;
+
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -21,9 +34,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * HTTP-layer tests for the API skeleton. Loads only the two handwritten
- * controllers together with the real dummy services (no mocks) so that DTO
- * construction and JSON serialization are exercised end to end.
+ * HTTP-layer tests for the API. Loads only the two handwritten controllers.
+ * The persistence-backed collaborators ({@link PosArchiveIntakeService} for
+ * the real upload, {@link IngestionJobRepository} for the job lookup) are
+ * mocked; the search/get/patch/delete/document operations still use the real
+ * dummy services.
  *
  * <p>The generated interface mappings are relative to
  * {@code ${openapi.pOSDocumentIngestion.base-path}} (overridden to empty in
@@ -42,8 +57,18 @@ class ApiSkeletonTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @MockitoBean
+    private PosArchiveIntakeService intakeService;
+
+    @MockitoBean
+    private IngestionJobRepository ingestionJobRepository;
+
     @Test
-    void uploadPosRecordReturns202WithFixedIdsAndLocation() throws Exception {
+    void uploadPosRecordReturns202WithPersistedIdsAndLocation() throws Exception {
+        UUID posRecordId = UUID.randomUUID();
+        UUID jobId = UUID.randomUUID();
+        when(this.intakeService.intake(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(new UploadResult(posRecordId, jobId));
         MockMultipartFile file = new MockMultipartFile("file", "dummy.zip", "application/zip",
                 new byte[] {1, 2, 3, 4});
 
@@ -51,9 +76,9 @@ class ApiSkeletonTest {
                         .file(file)
                         .param("policyNumber", "POLICY-UPLOAD-001"))
                 .andExpect(status().isAccepted())
-                .andExpect(header().string("Location", FIXED_LOCATION))
-                .andExpect(jsonPath("$.posRecordId").value(FIXED_POS_RECORD_ID))
-                .andExpect(jsonPath("$.jobId").value(FIXED_JOB_ID))
+                .andExpect(header().string("Location", "/api/v1/pos-records/" + posRecordId))
+                .andExpect(jsonPath("$.posRecordId").value(posRecordId.toString()))
+                .andExpect(jsonPath("$.jobId").value(jobId.toString()))
                 .andExpect(jsonPath("$.status").value("UPLOADED"));
     }
 
@@ -120,15 +145,41 @@ class ApiSkeletonTest {
     }
 
     @Test
-    void getIngestionJobEchoesPathJobIdWithDummyValues() throws Exception {
-        String pathJobId = "22222222-2222-2222-2222-222222222222";
+    void getIngestionJobReturnsPersistedJob() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        UUID posRecordId = UUID.randomUUID();
+        Instant createdAt = Instant.parse("2026-01-02T03:04:05Z");
+        IngestionJobEntity entity = org.mockito.Mockito.mock(IngestionJobEntity.class);
+        PosRecordEntity posRecord = org.mockito.Mockito.mock(PosRecordEntity.class);
+        when(posRecord.getId()).thenReturn(posRecordId);
+        when(entity.getId()).thenReturn(jobId);
+        when(entity.getPosRecord()).thenReturn(posRecord);
+        when(entity.getStatus()).thenReturn(JobStatus.QUEUED);
+        when(entity.getAttemptCount()).thenReturn(0L);
+        when(entity.getCreatedAt()).thenReturn(createdAt);
+        when(this.ingestionJobRepository.findByIdAndPosRecordDeletedAtIsNull(jobId))
+                .thenReturn(Optional.of(entity));
 
-        mockMvc.perform(get("/ingestion-jobs/{jobId}", pathJobId))
+        mockMvc.perform(get("/ingestion-jobs/{jobId}", jobId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.id").value(pathJobId))
-                .andExpect(jsonPath("$.posRecordId").value(FIXED_POS_RECORD_ID))
-                .andExpect(jsonPath("$.status").value("COMPLETED"))
-                .andExpect(jsonPath("$.attemptCount").value(1));
+                .andExpect(jsonPath("$.id").value(jobId.toString()))
+                .andExpect(jsonPath("$.posRecordId").value(posRecordId.toString()))
+                .andExpect(jsonPath("$.status").value("QUEUED"))
+                .andExpect(jsonPath("$.attemptCount").value(0));
+    }
+
+    @Test
+    void getIngestionJobReturns404ProblemWhenUnknown() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        when(this.ingestionJobRepository.findByIdAndPosRecordDeletedAtIsNull(jobId))
+                .thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/ingestion-jobs/{jobId}", jobId))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.code").value("INGESTION_JOB_NOT_FOUND"))
+                .andExpect(jsonPath("$.detail").value("The requested resource does not exist."));
     }
 
     @Test
@@ -143,4 +194,5 @@ class ApiSkeletonTest {
         mockMvc.perform(get("/pos-records/{id}", "not-a-uuid"))
                 .andExpect(status().isBadRequest());
     }
+
 }

@@ -110,6 +110,28 @@ public class MinioObjectStorage {
 		}
 	}
 
+	public io.minio.StatObjectResponse stat(String objectKey) {
+		validateObjectKey(objectKey);
+		try {
+			return this.minioClient.statObject(StatObjectArgs.builder()
+				.bucket(this.properties.bucket())
+				.object(objectKey)
+				.build());
+		}
+		catch (ErrorResponseException e) {
+			if (isNoSuchKey(e)) {
+				throw new ObjectStorageException("Object not found: " + objectKey, e);
+			}
+			throw new ObjectStorageException("Failed to stat object: " + objectKey, e);
+		}
+		catch (MinioException e) {
+			throw new ObjectStorageException("Failed to stat object: " + objectKey, e);
+		}
+		catch (RuntimeException e) {
+			throw new ObjectStorageException("Failed to stat object: " + objectKey, e);
+		}
+	}
+
 	public void delete(String objectKey) {
 		validateObjectKey(objectKey);
 		try {
