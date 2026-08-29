@@ -1,0 +1,686 @@
+openapi: 3.1.0
+info:
+  title: POS Document Ingestion API
+  version: 0.1.0
+  description: |
+    Backend API for asynchronously ingesting ZIP archives containing point-of-sale
+    insurance documents, reviewing OCR-extracted metadata, and searching POS records.
+
+    Each ZIP archive represents one POS record. The eRef number and non-null policy
+    number are globally unique across active POS records. Uploaded archives are stored
+    durably before a job identifier is published to RabbitMQ; archive bytes are never
+    sent through RabbitMQ.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: POS records
+  - name: Ingestion jobs
+
+paths:
+  /pos-records:
+    post:
+      tags: [POS records]
+      operationId: uploadPosRecord
+      summary: Upload a POS archive for asynchronous processing
+      description: |
+        Accepts one ZIP archive of up to 10 MiB. The service validates and stores the
+        archive, creates a POS record and ingestion job, and queues only the job ID.
+        The policy number may be supplied now or added later with PATCH.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: ZIP archive containing PDF documents.
+                policyNumber:
+                  $ref: '#/components/schemas/PolicyNumber'
+            encoding:
+              file:
+                contentType: application/zip
+      responses:
+        '202':
+          description: Archive stored and ingestion scheduled.
+          headers:
+            Location:
+              description: URL of the newly created POS record.
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pos-records/search:
+    post:
+      tags: [POS records]
+      operationId: searchPosRecords
+      summary: Search POS records
+      description: |
+        Performs exact matching on normalized eRef and policy numbers and optional
+        fuzzy matching on normalized policyholder names. Deleted records are excluded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PosRecordSearchRequest'
+      responses:
+        '200':
+          description: Paginated search results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PosRecordSearchPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pos-records/{posRecordId}:
+    parameters:
+      - $ref: '#/components/parameters/PosRecordId'
+    get:
+      tags: [POS records]
+      operationId: getPosRecord
+      summary: Get a POS record
+      responses:
+        '200':
+          description: POS record details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PosRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    patch:
+      tags: [POS records]
+      operationId: updatePosRecord
+      summary: Correct or add POS metadata
+      description: |
+        Applies a partial update to user-editable metadata. `expectedVersion` prevents
+        lost updates. System-managed identifiers, processing state, storage references,
+        audit fields, and timestamps cannot be changed through this operation.
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/PosRecordPatch'
+      responses:
+        '200':
+          description: Updated POS record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PosRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    delete:
+      tags: [POS records]
+      operationId: deletePosRecord
+      summary: Soft-delete a POS record
+      description: |
+        Marks the record deleted and removes it from normal reads and searches. Physical
+        deletion of stored files is governed separately by the retention policy.
+      responses:
+        '204':
+          description: POS record soft-deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pos-records/{posRecordId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/PosRecordId'
+    get:
+      tags: [POS records]
+      operationId: listPosDocuments
+      summary: List PDFs extracted from a POS archive
+      responses:
+        '200':
+          description: Documents associated with the POS record.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PosDocument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /ingestion-jobs/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    get:
+      tags: [Ingestion jobs]
+      operationId: getIngestionJob
+      summary: Get ingestion progress
+      description: Error information is sanitized and never contains document PII.
+      responses:
+        '200':
+          description: Current ingestion job state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionJob'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT issued after Google OpenID Connect authentication.
+
+  parameters:
+    PosRecordId:
+      name: posRecordId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    PolicyNumber:
+      type: string
+      minLength: 1
+      maxLength: 256
+      pattern: '.*\\S.*'
+      description: Unique policy number after server-side normalization.
+      examples: ['P12345678']
+
+    ErefNumber:
+      type: string
+      minLength: 1
+      maxLength: 256
+      pattern: '.*\\S.*'
+      description: Unique eRef number derived from the source archive filename.
+      examples: ['EREF-2026-00123']
+
+    PosRecordStatus:
+      type: string
+      enum:
+        - UPLOADED
+        - VALIDATING
+        - PROCESSING
+        - REVIEW_REQUIRED
+        - COMPLETED
+        - FAILED
+
+    DocumentProcessingStatus:
+      type: string
+      enum: [PENDING, PROCESSING, COMPLETED, FAILED, SKIPPED]
+
+    JobStatus:
+      type: string
+      enum: [QUEUED, RUNNING, RETRY_SCHEDULED, COMPLETED, FAILED]
+
+    DocumentType:
+      type: string
+      enum: [FA_PRUPLANNER_REPORT, OTHER, UNKNOWN]
+
+    UploadAccepted:
+      type: object
+      additionalProperties: false
+      required: [posRecordId, jobId, status]
+      properties:
+        posRecordId:
+          type: string
+          format: uuid
+        jobId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          const: UPLOADED
+
+    StorageObjectSummary:
+      type: object
+      additionalProperties: false
+      required: [id, originalFilename, contentType, byteSize, sha256]
+      properties:
+        id:
+          type: string
+          format: uuid
+        originalFilename:
+          type: string
+          minLength: 1
+          maxLength: 512
+        contentType:
+          type: string
+          maxLength: 128
+        byteSize:
+          type: integer
+          format: int64
+          minimum: 0
+        sha256:
+          type: string
+          pattern: '^[A-Fa-f0-9]{64}$'
+
+    PosRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - status
+        - sourceArchive
+        - uploadedAt
+        - updatedAt
+        - uploadedBy
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        erefNumber:
+          anyOf:
+            - $ref: '#/components/schemas/ErefNumber'
+            - type: 'null'
+          description: Null until filename metadata has been derived successfully.
+        policyNumber:
+          anyOf:
+            - $ref: '#/components/schemas/PolicyNumber'
+            - type: 'null'
+        policyholderName:
+          type: [string, 'null']
+          maxLength: 256
+        consultantName:
+          type: [string, 'null']
+          maxLength: 256
+        policyCreateDate:
+          type: [string, 'null']
+          format: date
+        status:
+          $ref: '#/components/schemas/PosRecordStatus'
+        sourceArchive:
+          $ref: '#/components/schemas/StorageObjectSummary'
+        uploadedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        uploadedBy:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Stable subject identifier of the authenticated uploader.
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+
+    PosRecordSummary:
+      type: object
+      additionalProperties: false
+      required: [id, status, uploadedAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        erefNumber:
+          type: [string, 'null']
+          maxLength: 256
+        policyNumber:
+          type: [string, 'null']
+          maxLength: 256
+        policyholderName:
+          type: [string, 'null']
+          maxLength: 256
+        consultantName:
+          type: [string, 'null']
+          maxLength: 256
+        policyCreateDate:
+          type: [string, 'null']
+          format: date
+        status:
+          $ref: '#/components/schemas/PosRecordStatus'
+        uploadedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PosRecordPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 2
+      required: [expectedVersion]
+      properties:
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+        erefNumber:
+          $ref: '#/components/schemas/ErefNumber'
+        policyNumber:
+          $ref: '#/components/schemas/PolicyNumber'
+        policyholderName:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\\S.*'
+        consultantName:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\\S.*'
+        policyCreateDate:
+          type: string
+          format: date
+
+    PosRecordSearchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        erefNumber:
+          $ref: '#/components/schemas/ErefNumber'
+        policyNumber:
+          $ref: '#/components/schemas/PolicyNumber'
+        policyholderName:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\\S.*'
+        fuzzyName:
+          type: boolean
+          default: true
+          description: Apply trigram similarity to policyholderName when present.
+        minimumNameSimilarity:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          default: 0.3
+        statuses:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/PosRecordStatus'
+        page:
+          type: integer
+          minimum: 0
+          default: 0
+        size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        sort:
+          type: string
+          enum:
+            - RELEVANCE
+            - UPLOADED_AT_DESC
+            - UPLOADED_AT_ASC
+            - UPDATED_AT_DESC
+            - UPDATED_AT_ASC
+          default: RELEVANCE
+
+    PosRecordSearchPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, size, totalElements, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PosRecordSummary'
+        page:
+          type: integer
+          minimum: 0
+        size:
+          type: integer
+          minimum: 1
+        totalElements:
+          type: integer
+          format: int64
+          minimum: 0
+        totalPages:
+          type: integer
+          minimum: 0
+
+    PosDocument:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - posRecordId
+        - storageObject
+        - documentType
+        - processingStatus
+      properties:
+        id:
+          type: string
+          format: uuid
+        posRecordId:
+          type: string
+          format: uuid
+        storageObject:
+          $ref: '#/components/schemas/StorageObjectSummary'
+        documentType:
+          $ref: '#/components/schemas/DocumentType'
+        processingStatus:
+          $ref: '#/components/schemas/DocumentProcessingStatus'
+
+    IngestionJob:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - posRecordId
+        - status
+        - attemptCount
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        posRecordId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        attemptCount:
+          type: integer
+          minimum: 0
+        errorCode:
+          type: [string, 'null']
+          maxLength: 100
+          examples: [OCR_EXTRACTION_FAILED]
+        errorMessage:
+          type: [string, 'null']
+          maxLength: 512
+          description: Sanitized message that contains no policyholder data or document text.
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          default: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          description: Sanitized explanation containing no PII or document contents.
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          description: Stable machine-readable application error code.
+          examples: [DUPLICATE_POLICY_NUMBER]
+        traceId:
+          type: string
+          description: Correlation identifier safe to include in support requests.
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: Malformed request or invalid parameter.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Authentication is required or the token is invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: The authenticated user is not permitted to perform this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: The requested resource does not exist or has been deleted.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: |
+        The operation conflicts with current state, including a duplicate normalized
+        eRef number or non-null policy number.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PreconditionFailed:
+      description: expectedVersion does not match the current resource version.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: The archive exceeds the configured compressed or expanded size limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnsupportedMediaType:
+      description: The uploaded file is not a supported ZIP archive.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableContent:
+      description: The archive or update is syntactically valid but cannot be processed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalServerError:
+      description: Unexpected internal error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'

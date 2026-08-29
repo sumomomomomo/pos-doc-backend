@@ -1,3 +1,14 @@
 spring:
   application:
     name: pos-doc-backend
+
+server:
+  servlet:
+    context-path: /api/v1
+
+# The generated API interfaces carry the base path as a placeholder; it is
+# supplied via the servlet context path above, so it must be overridden to an
+# empty value to keep the deployed routes at /api/v1/...
+openapi:
+  pOSDocumentIngestion:
+    base-path: ""
