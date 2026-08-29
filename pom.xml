@@ -38,6 +38,29 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.hibernate.orm</groupId>
+			<artifactId>hibernate-community-dialects</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.minio</groupId>
+			<artifactId>minio</artifactId>
+			<version>9.0.3</version>
+		</dependency>
+		<!-- OkHttp 5.x publishes a Kotlin Multiplatform root artifact whose
+			 Maven Central jar is an empty stub; Maven 3 does not consume Gradle
+			 module metadata, so the JVM variant (and its okio-jvm /
+			 kotlin-stdlib transitive deps) must be declared explicitly. Version
+			 matches the okhttp version declared by minio 9.0.3. -->
+		<dependency>
+			<groupId>com.squareup.okhttp3</groupId>
+			<artifactId>okhttp-jvm</artifactId>
+			<version>5.3.2</version>
+		</dependency>
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -49,6 +72,11 @@
 			<groupId>org.xerial</groupId>
 			<artifactId>sqlite-jdbc</artifactId>
 			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>testcontainers-minio</artifactId>
+			<scope>test</scope>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -71,6 +99,11 @@
 	</dependencies>
 
 	<build>
+		<!-- Single deterministic runnable JAR (target/app.jar), as required by
+			 the Dockerfile. Project-level finalName is the supported Maven
+			 mechanism; spring-boot-maven-plugin's own 'finalName' parameter is
+			 read-only in Spring Boot 4 and is ignored. -->
+		<finalName>app</finalName>
 		<plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>

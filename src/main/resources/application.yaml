@@ -2,11 +2,21 @@ spring:
   application:
     name: pos-doc-backend
 
-  # TODO: skeleton only - no database is configured yet; remove this exclusion
-  # when PostgreSQL and JPA are introduced.
-  autoconfigure:
-    exclude:
-      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+  datasource:
+    url: ${SQLITE_URL:jdbc:sqlite:./pos-doc.db}
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 1
+      connection-timeout: 5000
+      data-source-properties:
+        foreign_keys: "true"
+        journal_mode: WAL
+        busy_timeout: "5000"
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
 
 server:
   servlet:
@@ -18,3 +28,20 @@ server:
 openapi:
   pOSDocumentIngestion:
     base-path: ""
+
+storage:
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    access-key: ${MINIO_ACCESS_KEY:local-dev-access}
+    secret-key: ${MINIO_SECRET_KEY:local-dev-secret-change-me}
+    bucket: ${MINIO_BUCKET:pos-documents}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true

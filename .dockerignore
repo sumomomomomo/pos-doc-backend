@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+.vscode
+target
+plans
+*.iml
+*.log
+.env
+pos-doc.db
+pos-doc.db-shm
+pos-doc.db-wal
