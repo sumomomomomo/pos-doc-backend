@@ -1,20 +1,17 @@
 package horse.sumomo.pos_doc_backend.infrastructure.minio;
 
 import java.io.ByteArrayInputStream;
-import java.io.Closeable;
 import java.io.InputStream;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import javax.sql.DataSource;
-
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -37,13 +34,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * MinIO properties) are created. If Docker is unavailable, Testcontainers
  * fails fast with a clear prerequisite message; the test never silently skips.
  *
- * <p>Cleanup stops the container and closes the {@link DataSource} (releasing
- * the SQLite file handle) before deleting the temporary database files. The
- * application context itself is deliberately left running: in this Spring
- * version, closing it here would cause the framework's own {@code afterTestClass}
- * listeners to try to restart the already-closed cached context and fail.
+ * <p>Cleanup stops the manually managed Testcontainers container in
+ * {@code @AfterAll}. The Spring-managed {@code DataSource} is left for Spring
+ * to close: the context is closed by Spring itself via {@link DirtiesContext}
+ * after the class, so the test never closes it by hand. The temporary
+ * database and its WAL/SHM side files are registered for deletion on JVM
+ * exit instead of being force-removed before Spring has closed.
  */
 @SpringBootTest
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class MinioObjectStorageIntegrationTest {
 
 	private static final String TEST_BUCKET = "pos-documents-test";
@@ -51,11 +50,6 @@ class MinioObjectStorageIntegrationTest {
 			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
 
 	private static MinIOContainer minio;
-	private static Path sqliteDbFile;
-	private static DataSource dataSourceRef;
-
-	@Autowired
-	private DataSource dataSource;
 
 	@Autowired
 	private MinioObjectStorage storage;
@@ -82,26 +76,18 @@ class MinioObjectStorageIntegrationTest {
 		registry.add("storage.minio.bucket", () -> TEST_BUCKET);
 
 		// Keep this test's context away from the developer's local database.
-		sqliteDbFile = Files.createTempFile("pos-doc-minio-test", ".db");
+		Path sqliteDbFile = Files.createTempFile("pos-doc-minio-test", ".db");
+		sqliteDbFile.toFile().deleteOnExit();
+		Path.of(sqliteDbFile.toString() + "-wal").toFile().deleteOnExit();
+		Path.of(sqliteDbFile.toString() + "-shm").toFile().deleteOnExit();
 		registry.add("SQLITE_URL", () -> "jdbc:sqlite:" + sqliteDbFile);
 	}
 
-	@BeforeEach
-	void captureDataSource() {
-		dataSourceRef = this.dataSource;
-	}
-
 	@AfterAll
-	static void stopContainerAndRemoveTempDatabase() throws Exception {
+	static void stopContainer() {
 		if (minio != null && minio.isRunning()) {
 			minio.stop();
 		}
-		if (dataSourceRef instanceof Closeable closeable) {
-			closeable.close();
-		}
-		Files.deleteIfExists(sqliteDbFile);
-		Files.deleteIfExists(Path.of(sqliteDbFile.toString() + "-wal"));
-		Files.deleteIfExists(Path.of(sqliteDbFile.toString() + "-shm"));
 	}
 
 	@Test

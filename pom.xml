@@ -46,6 +46,15 @@
 			<groupId>org.hibernate.orm</groupId>
 			<artifactId>hibernate-community-dialects</artifactId>
 		</dependency>
+		<!-- Spring Boot 4 modularized Flyway support out of the core
+			 autoconfigure jar into the dedicated flyway module (packaged via
+			 this starter, which also brings the managed flyway-core). Plain
+			 flyway-core alone no longer triggers FlywayAutoConfiguration in
+			 Boot 4, so the starter is required for migrations to run. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-flyway</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>io.minio</groupId>
 			<artifactId>minio</artifactId>

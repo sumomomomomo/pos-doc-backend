@@ -1,17 +1,15 @@
 package horse.sumomo.pos_doc_backend.infrastructure.sqlite;
 
-import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
 import javax.sql.DataSource;
 
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -24,18 +22,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link DataSource} and {@link SQLiteConfiguration} pragmas in effect.
  *
  * <p>A unique temporary database file is used via {@code SQLITE_URL}; the
- * developer's normal {@code pos-doc.db} is never touched. Before the temporary
- * database and its WAL/SHM side files are deleted, the {@link DataSource} is
- * closed so that its connection pool releases the SQLite file handle. The
- * application context itself is deliberately left running: in this Spring
- * version, closing it here would cause the framework's own {@code afterTestClass}
- * listeners to try to restart the already-closed cached context and fail.
+ * developer's normal {@code pos-doc.db} is never touched. The context is
+ * closed by Spring itself via {@link DirtiesContext} after the class; the
+ * test never closes the managed {@code DataSource} by hand. The temporary
+ * database and its WAL/SHM side files are registered for deletion on JVM
+ * exit instead of being force-removed before Spring has closed.
  */
 @SpringBootTest
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class SQLiteIntegrationTest {
-
-	private static Path dbFile;
-	private static DataSource dataSourceRef;
 
 	@Autowired
 	private DataSource dataSource;
@@ -45,23 +40,11 @@ class SQLiteIntegrationTest {
 
 	@DynamicPropertySource
 	static void sqliteUrl(DynamicPropertyRegistry registry) throws Exception {
-		dbFile = Files.createTempFile("pos-doc-sqlite-test", ".db");
+		Path dbFile = Files.createTempFile("pos-doc-sqlite-test", ".db");
+		dbFile.toFile().deleteOnExit();
+		Path.of(dbFile.toString() + "-wal").toFile().deleteOnExit();
+		Path.of(dbFile.toString() + "-shm").toFile().deleteOnExit();
 		registry.add("SQLITE_URL", () -> "jdbc:sqlite:" + dbFile);
-	}
-
-	@BeforeEach
-	void captureDataSource() {
-		dataSourceRef = this.dataSource;
-	}
-
-	@AfterAll
-	static void releaseDatabaseAndRemoveTempFiles() throws Exception {
-		if (dataSourceRef instanceof Closeable closeable) {
-			closeable.close();
-		}
-		Files.deleteIfExists(dbFile);
-		Files.deleteIfExists(Path.of(dbFile.toString() + "-wal"));
-		Files.deleteIfExists(Path.of(dbFile.toString() + "-shm"));
 	}
 
 	@Test

@@ -8,13 +8,19 @@ import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Applies SQLite-specific PRAGMAs on the configured data source at startup,
- * before any business repository can use a connection.
+ * Applies SQLite-specific PRAGMAs on the configured data source at startup.
  *
- * <p>The same PRAGMAs are also supplied as JDBC connection properties in
- * {@code application.yaml} so that they are re-applied whenever Hikari creates
- * a replacement connection. The startup pass here additionally guarantees the
- * pragmas are in effect on the very first connection of the application.
+ * <p>The primary mechanism is Hikari: the same PRAGMAs are supplied as JDBC
+ * connection properties ({@code spring.datasource.hikari.data-source-properties})
+ * in {@code application.yaml}, so every connection Hikari creates — including
+ * replacement connections — gets the PRAGMAs applied. That is what guarantees
+ * each connection is configured before it is handed out to any repository.
+ *
+ * <p>The {@link ApplicationReadyEvent} listener here performs an additional
+ * startup verification/application pass once the application is ready. It is
+ * not the mechanism guaranteeing pre-repository connection configuration:
+ * {@code ApplicationReadyEvent} fires after the context has been refreshed,
+ * by which point repositories could already have obtained connections.
  *
  * <p>No business tables are created here, and failures are not swallowed:
  * a SQL exception propagates and fails application startup.
