@@ -27,7 +27,9 @@ import horse.sumomo.pos_doc_backend.persistence.normalization.MetadataNormalizer
  *
  * <p>eRef, policy number, and policyholder name are set through paired
  * mutators that always write the display and normalized columns together via
- * {@link MetadataNormalizer}; there is no way to alter a normalized column
+ * {@link MetadataNormalizer}; the normalized value is computed before either
+ * field is assigned, so an update rejected by the normalizer leaves both
+ * fields unchanged. There is no way to alter a normalized column
  * independently. Deletion is soft only: {@link #markDeleted(Instant)} stamps
  * {@code deletedAt} (and {@code updatedAt}) on first use and is a no-op when
  * the record is already deleted. It never touches related storage objects,
@@ -124,18 +126,21 @@ public class PosRecordEntity {
 	}
 
 	public void setErefNumber(String value) {
+		String normalized = MetadataNormalizer.normalizeIdentifier(value);
 		this.erefNumber = value;
-		this.erefNumberNormalized = value == null ? null : MetadataNormalizer.normalizeIdentifier(value);
+		this.erefNumberNormalized = normalized;
 	}
 
 	public void setPolicyNumber(String value) {
+		String normalized = MetadataNormalizer.normalizeIdentifier(value);
 		this.policyNumber = value;
-		this.policyNumberNormalized = value == null ? null : MetadataNormalizer.normalizeIdentifier(value);
+		this.policyNumberNormalized = normalized;
 	}
 
 	public void setPolicyholderName(String value) {
+		String normalized = MetadataNormalizer.normalizeName(value);
 		this.policyholderName = value;
-		this.policyholderNameNormalized = value == null ? null : MetadataNormalizer.normalizeName(value);
+		this.policyholderNameNormalized = normalized;
 	}
 
 	public void setConsultantName(String value) {

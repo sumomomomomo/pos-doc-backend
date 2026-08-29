@@ -97,4 +97,30 @@ class MetadataNormalizerTest {
 		assertEquals("jane tan", MetadataNormalizer.normalizeName("Jane\u3000Tan"));
 	}
 
+	@Test
+	void identifierKeepsLettersOutsideTheBasicMultilingualPlane() {
+		// U+20000 is the first CJK Unified Ideograph Extension B character,
+		// a Unicode letter (Lo) outside the Basic Multilingual Plane,
+		// encoded as the UTF-16 surrogate pair D840 DC00. A char-by-char
+		// scan would see only surrogate halves (neither is a letter) and
+		// drop the character; the code-point scan must keep it.
+		assertEquals("A\uD840\uDC001", MetadataNormalizer.normalizeIdentifier("A\uD840\uDC00-1"));
+	}
+
+	@Test
+	void nameKeepsCharactersOutsideTheBasicMultilingualPlane() {
+		// Two supplementary-plane CJK ideographs separated by Unicode
+		// whitespace survive name normalization intact, proving the
+		// collapsing and re-assembly work on code points, not UTF-16 units.
+		assertEquals("\uD840\uDC00 \uD840\uDC01",
+				MetadataNormalizer.normalizeName(" \uD840\uDC00\u00A0\u2003\uD840\uDC01 "));
+	}
+
+	@Test
+	void nameSupplementaryPlaneLetterAdjacentToBmpLetterIsPreserved() {
+		// A supplementary-plane character directly adjacent to a BMP letter
+		// must not be split or lost when appended to the result.
+		assertEquals("a\uD840\uDC00", MetadataNormalizer.normalizeName("a\uD840\uDC00"));
+	}
+
 }

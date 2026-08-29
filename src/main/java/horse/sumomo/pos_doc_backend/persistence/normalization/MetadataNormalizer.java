@@ -35,12 +35,11 @@ public final class MetadataNormalizer {
 		}
 		String upper = Normalizer.normalize(value, Normalizer.Form.NFKC).toUpperCase(Locale.ROOT);
 		StringBuilder result = new StringBuilder(upper.length());
-		for (int i = 0; i < upper.length(); i++) {
-			char c = upper.charAt(i);
-			if (Character.isLetter(c) || Character.getType(c) == Character.DECIMAL_DIGIT_NUMBER) {
-				result.append(c);
+		upper.codePoints().forEach(cp -> {
+			if (Character.isLetter(cp) || Character.getType(cp) == Character.DECIMAL_DIGIT_NUMBER) {
+				result.appendCodePoint(cp);
 			}
-		}
+		});
 		if (result.isEmpty()) {
 			throw new IllegalArgumentException("value is empty after identifier normalization");
 		}
@@ -53,18 +52,18 @@ public final class MetadataNormalizer {
 		}
 		String trimmed = trimUnicodeWhitespace(Normalizer.normalize(value, Normalizer.Form.NFKC));
 		String lower = trimmed.toLowerCase(Locale.ROOT);
+		int[] codePoints = lower.codePoints().toArray();
 		StringBuilder result = new StringBuilder(lower.length());
 		boolean previousWhitespace = false;
-		for (int i = 0; i < lower.length(); i++) {
-			char c = lower.charAt(i);
-			if (Character.isWhitespace(c)) {
+		for (int cp : codePoints) {
+			if (Character.isWhitespace(cp)) {
 				previousWhitespace = true;
 			}
 			else {
 				if (previousWhitespace && result.length() > 0) {
 					result.append(' ');
 				}
-				result.append(c);
+				result.appendCodePoint(cp);
 				previousWhitespace = false;
 			}
 		}
@@ -76,12 +75,12 @@ public final class MetadataNormalizer {
 
 	private static String trimUnicodeWhitespace(String value) {
 		int start = 0;
-		int end = value.length();
-		while (start < end && Character.isWhitespace(value.charAt(start))) {
-			start++;
+		while (start < value.length() && Character.isWhitespace(value.codePointAt(start))) {
+			start += Character.charCount(value.codePointAt(start));
 		}
-		while (end > start && Character.isWhitespace(value.charAt(end - 1))) {
-			end--;
+		int end = value.length();
+		while (end > start && Character.isWhitespace(value.codePointAt(end - Character.charCount(value.codePointAt(end - 1))))) {
+			end -= Character.charCount(value.codePointAt(end - 1));
 		}
 		return value.substring(start, end);
 	}
