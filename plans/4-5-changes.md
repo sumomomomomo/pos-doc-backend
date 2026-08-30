@@ -5,55 +5,57 @@
 > 1. `45637d6` — initial implementation (ZIP intake + RabbitMQ outbox).
 > 2. `1e3109d` — fixture helper.
 > 3. `3d8e93e` — first corrective commit (review findings 1–7).
-> 4. *this commit* — second corrective commit:
->    - **Finding 8**: enforce *all* ZIP expansion limits during each entry read
->      (pre-entry `effectiveEntryLimit` arithmetic with overflow-safe ratio
->      product; per-entry, total, and ratio cap all enforced *during* the
->      bounded read, not only after the entry finishes).
->    - **Finding 9**: the previous `UploadSizeRejectionIntegrationTest`
->      exercised a MockMvc-only path that bypassed the servlet container's
->      multipart parser, so it proved the application-level mapping but not
->      that `MaxUploadSizeExceededException` was handled. The test class
->      has been split into three layers:
->      - `MaxUploadSizeAdviceTest` — direct invocation of
->        `ApiExceptionHandler.handleMaxUploadSize` with a real
->        `MaxUploadSizeExceededException`, asserting `413` /
->        `application/problem+json` / `ARCHIVE_TOO_LARGE` / sanitized
->        detail.
->      - `UploadSizeRealHttpRejectionTest` — a real HTTP integration test
->        using `@SpringBootTest(webEnvironment = RANDOM_PORT)` that sends
->        a 10 MiB + 1 byte multipart request over a raw `HttpURLConnection`
->        to the embedded Tomcat. The container's multipart parser raises
->        `MaxUploadSizeExceededException` before the request reaches
->        `BoundedUploadSpooler`; the advice maps it to the 413 problem
->        response. The intake service is mocked and must never be invoked.
->        MinIO and RabbitMQ are not contacted.
->      - `ApiSkeletonTest.oversizeUploadReturns413ArchiveTooLarge` (already
->        present) keeps the MockMvc-based application-level 413 mapping
->        test.
->      The misleading comment that claimed MockMvc exercises servlet
->      multipart parsing has been removed.
+> 4. `25abbb8` — second corrective commit (enforce all ZIP limits during
+>    entry read; split oversize-upload test into advice/real-HTTP/MockMvc).
+> 5. *this commit* — third corrective commit:
+>    - **Finding 10** (real-HTTP test was lenient): the
+>      `UploadSizeRealHttpRejectionTest` accepted `status == 500` and
+>      silently swallowed `IOException` from `getResponseCode()`, so it
+>      could pass even when the servlet exception mapping was broken.
+>      The test now **strictly** asserts `assertEquals(413, status)`,
+>      `application/problem+json`, the `ARCHIVE_TOO_LARGE` code, the
+>      `"status":413` marker, and `verifyNoInteractions(intakeService)`.
+>      The server already returns the correct 413 (confirmed via the
+>      `ApiExceptionHandler` log line in the test run), so no runtime
+>      change was needed.
+>    - **Finding 11** (5-byte edge case): the per-entry read loop
+>      validated the magic bytes against the cap only after the magic
+>      read had completed. If the effective allowance was below 5 bytes
+>      (e.g. remaining-total or remaining-ratio < 5), the magic read
+>      itself could exceed the cap before being checked. A new
+>      `if (bytesRead > maxEntryBytes) throw ...` is now performed
+>      immediately after the magic is read, *before* any body bytes.
+>      A new test
+>      `readAndValidatePdfRejectsImmediatelyWhenEffectiveLimitIsBelowMagicSize`
+>      exercises every cap value from 0 to 4 and asserts the counting
+>      stream observed exactly 5 bytes (the magic) and was never read
+>      to completion.
 >
-> See §8.8 below for the per-finding diffs and the new test coverage.
+> See §8.10 below for the per-finding diffs and the new test coverage.
 >
 > ## Verification (this commit)
 >
-> 1. `mvnw.cmd clean verify` → **Tests run: 151, Failures: 0, Errors: 0,
->    Skipped: 0** — BUILD SUCCESS (run twice, idempotent).
-> 2. `docker compose --env-file .env.example config --quiet` → exit 0.
-> 3. `bash scripts/verify-container-stack.sh` →
+> 1. `mvnw.cmd clean verify` (run 1) → **Tests run: 152, Failures: 0,
+>    Errors: 0, Skipped: 0** — BUILD SUCCESS.
+> 2. `mvnw.cmd clean verify` (run 2) → **Tests run: 152, Failures: 0,
+>    Errors: 0, Skipped: 0** — BUILD SUCCESS (idempotent).
+> 3. `docker compose --env-file .env.example config --quiet` → exit 0.
+> 4. `bash scripts/verify-container-stack.sh` →
 >    **`verify-container-stack: ALL CHECKS PASSED`** (full stack: MinIO,
 >    RabbitMQ, backend; upload 202; job `QUEUED`; queue message has only
 >    identifiers; durable message survives RabbitMQ restart; MinIO marker
 >    survives restart; SQLite file present across restarts; backend
 >    remains healthy across restarts).
-> 4. `mvnw.cmd clean verify` (post-stack) → **Tests run: 151, Failures: 0,
+> 5. `mvnw.cmd clean verify` (post-stack) → **Tests run: 152, Failures: 0,
 >    Errors: 0, Skipped: 0** — BUILD SUCCESS.
-> 5. `git status --short` → 5 paths (1 modified production file, 1 deleted
->    test file, 1 modified test file, 2 new test files).
+> 6. `git status --short` → 3 paths (1 modified production file,
+>    2 modified test files).
 >
 > All Testcontainers-based integration tests (real MinIO, real RabbitMQ,
-> real Spring context) executed with zero skips.
+> real Spring context) executed with zero skips. The real-HTTP
+> `UploadSizeRealHttpRejectionTest` successfully sent 10 MiB + 1 byte
+> through the embedded Tomcat and asserted the strict 413 contract
+> (no `500` fallback, no `IOException` swallow).
 >
 > ---
 
@@ -577,6 +579,69 @@ covering one layer of the contract:
 Together these three tests cover the full chain: the advice in
 isolation, the servlet container rejection in integration, and the
 application-level mapping via MockMvc.
+
+### 8.10 (Blocking) Real-HTTP test permitted the failure it was meant to detect
+
+The `UploadSizeRealHttpRejectionTest` in commit `25abbb8` accepted
+`status == 413 || status == 500` and silently caught
+`java.io.IOException` from `getResponseCode()`. Both branches could
+mask a broken servlet exception mapping or a connection failure for an
+unrelated reason, and the test could therefore pass even when the
+required 413 contract was violated.
+
+**Fix:** the test was tightened to the exact contract the plan requires:
+
+```java
+assertEquals(413, status);
+assertTrue(contentType.contains("application/problem+json"));
+assertTrue(body.contains("ARCHIVE_TOO_LARGE"));
+assertTrue(body.contains("\"status\":413"));
+assertFalse(body.contains(filename));
+assertFalse(body.contains("MaxUploadSize"));
+org.mockito.Mockito.verifyNoInteractions(this.intakeService);
+```
+
+The `try { ... } catch (IOException) { return; }` block was removed; an
+`IOException` now propagates as a test failure. The lenient
+`status == 413 || status == 500` branch was removed.
+
+The runtime path already returns `413` (verified by the
+`ApiExceptionHandler - Request rejected (category=archive-too-large)`
+log line captured during the test run, and by the
+`application/problem+json` body that the assertion now requires). No
+production change was required to make the test pass; the production
+behaviour already satisfied the strict contract.
+
+### 8.11 (Blocking) Magic-bytes cap check was applied only after the body read loop
+
+The per-entry read loop in `readAndValidatePdf` previously
+checked `bytesRead > maxEntryBytes` *after* every body chunk but
+*not* immediately after the 5-byte `%PDF-` magic. If the effective
+per-entry cap (e.g. remaining-total or remaining-ratio) was below 5,
+the magic read itself could exceed the cap before the next check
+ran.
+
+**Fix:** a new check was added immediately after the magic read, before
+any body bytes are read:
+
+```java
+bytesRead += magicRead;
+if (bytesRead > maxEntryBytes) {
+    throw invalid("archive entry exceeds the effective size limit");
+}
+```
+
+The body read loop still aborts at the first limit-breaking chunk.
+
+**New test** in [`ZipArchiveValidatorTest`](../src/test/java/horse/sumomo/pos_doc_backend/ingestion/archive/ZipArchiveValidatorTest.java):
+
+- `readAndValidatePdfRejectsImmediatelyWhenEffectiveLimitIsBelowMagicSize`
+  — exercises every cap value from 0 to 4 (`PDF_MAGIC_LEN - 1`). For
+  each, the test asserts the read is rejected with `INVALID_ARCHIVE`
+  *and* the counting stream observed exactly 5 bytes (the magic only,
+  no body bytes). A final sanity assertion with `cap == 5` confirms
+  the stream is not read to completion on the cap-equal-to-magic
+  boundary.
 
 ---
 

@@ -488,6 +488,37 @@ class ZipArchiveValidatorTest {
 	}
 
 	@Test
+	void readAndValidatePdfRejectsImmediatelyWhenEffectiveLimitIsBelowMagicSize() throws Exception {
+		// The effective per-entry cap may be below the 5-byte %PDF- magic
+		// itself (e.g. remaining-total or remaining-ratio is < 5). The
+		// magic read must itself be checked against the cap so the body
+		// is never read and the rejection is immediate.
+		byte[] content = pdfPayload(8L * ZipArchiveValidator.BUFFER_SIZE);
+
+		// Caps strictly below the 5-byte magic must abort the moment the
+		// magic is read; no body bytes may be read.
+		long[] belowMagic = {0L, 1L, 2L, 3L, 4L};
+		for (final long cap : belowMagic) {
+			CountingInputStream local = new CountingInputStream(new java.io.ByteArrayInputStream(content));
+			ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+					() -> ZipArchiveValidator.readAndValidatePdf(local, cap),
+					"effective cap " + cap + " must reject before any body is read");
+			assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+			assertEquals(5L, local.count,
+					"only the 5-byte magic may be read when the cap is below the magic size (cap="
+							+ cap + ")");
+		}
+
+		// Sanity: with cap == 5 (exactly the magic size) the read also
+		// rejects immediately on the first body chunk, before EOF.
+		CountingInputStream atFive = new CountingInputStream(new java.io.ByteArrayInputStream(content));
+		assertThrows(ArchiveValidationException.class,
+				() -> ZipArchiveValidator.readAndValidatePdf(atFive, PDF.length));
+		assertTrue(atFive.count < content.length,
+				"the stream must not be read to completion when cap == 5");
+	}
+
+	@Test
 	void totalUncompressedLimitIsEnforced() throws Exception {
 		// Each entry fits the per-entry limit (== 34 bytes) but the running
 		// total of two entries (68 bytes) exceeds the 34-byte budget.

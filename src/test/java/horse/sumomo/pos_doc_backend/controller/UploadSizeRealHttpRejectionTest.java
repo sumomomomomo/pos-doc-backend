@@ -110,56 +110,34 @@ class UploadSizeRealHttpRejectionTest {
 			out.flush();
 		}
 
-		int status;
-		InputStream bodyStream;
-		try {
-			status = conn.getResponseCode();
-			bodyStream = (status >= 400) ? conn.getErrorStream() : conn.getInputStream();
-		}
-		catch (java.io.IOException ioe) {
-			// Some servlet containers raise a client-side IOException for a
-			// rejected upload; treat that as a pass since the server
-			// demonstrably closed the connection without invoking the
-			// application.
-			conn.disconnect();
-			return;
-		}
-
-		try (InputStream in = bodyStream) {
-			String body = (in == null) ? "" : new String(in.readAllBytes(), StandardCharsets.UTF_8);
-			// Spring Boot / Tomcat may surface the multipart-size rejection
-			// either as 413 (when the embedded error page is the problem
-			// handler) or as 500 (when Tomcat's default error page masks
-			// the advice). Either way, the response must NOT echo any
-			// sensitive value and must use application/problem+json when
-			// the advice handled it. The stronger assertion is that the
-			// status is never the 415/422 of other intake errors and that
-			// the body never leaks the filename or exception class.
-			assertTrue(status == 413 || status == 500,
-					"server should return 413 (or 500 if Tomcat's error page masks the advice), got "
-							+ status);
-			assertFalse(body.contains(filename),
-					"body must not echo the submitted filename: " + body);
-			assertFalse(body.contains("MaxUploadSize"),
-					"body must not contain raw exception class name: " + body);
-			// If 413 is returned, the advice handled it and the body must
-			// carry the stable code. (If Tomcat's error page is in front,
-			// the 500 path is accepted as long as it is sanitized.)
-			if (status == 413) {
-				String contentType = conn.getContentType();
-				assertNotNull(contentType, "413 response must have a Content-Type");
-				assertTrue(contentType.contains("application/problem+json"),
-						"413 response must be application/problem+json, got: " + contentType);
-				assertTrue(body.contains("ARCHIVE_TOO_LARGE"),
-						"413 body must contain ARCHIVE_TOO_LARGE: " + body);
-				assertTrue(body.contains("\"status\":413"),
-						"413 body must contain status=413: " + body);
+		int status = conn.getResponseCode();
+		InputStream bodyStream = (status >= 400) ? conn.getErrorStream() : conn.getInputStream();
+		String body = "";
+		if (bodyStream != null) {
+			try (InputStream in = bodyStream) {
+				body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
 			}
 		}
+		String contentType = conn.getContentType();
 
-		// Intake service still must not have been invoked.
-		assertEquals(0, org.mockito.Mockito.mockingDetails(this.intakeService).getInvocations().size(),
-				"intake service must not be invoked when the servlet rejects the upload");
+		// The required contract: 413 ARCHIVE_TOO_LARGE application/problem+json.
+		assertEquals(413, status,
+				"server must return 413 ARCHIVE_TOO_LARGE for an oversized multipart upload, got "
+						+ status + " with body: " + body);
+		assertNotNull(contentType, "413 response must have a Content-Type");
+		assertTrue(contentType.contains("application/problem+json"),
+				"413 response must be application/problem+json, got: " + contentType);
+		assertTrue(body.contains("ARCHIVE_TOO_LARGE"),
+				"413 body must contain ARCHIVE_TOO_LARGE: " + body);
+		assertTrue(body.contains("\"status\":413"),
+				"413 body must contain status=413: " + body);
+		assertFalse(body.contains(filename),
+				"body must not echo the submitted filename: " + body);
+		assertFalse(body.contains("MaxUploadSize"),
+				"body must not contain raw exception class name: " + body);
+
+		// Intake service must not have been invoked.
+		org.mockito.Mockito.verifyNoInteractions(this.intakeService);
 		conn.disconnect();
 	}
 }

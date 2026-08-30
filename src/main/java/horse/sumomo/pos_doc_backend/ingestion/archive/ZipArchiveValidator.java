@@ -351,6 +351,14 @@ public class ZipArchiveValidator {
 			throw invalid("archive entry does not begin with the PDF signature");
 		}
 		bytesRead += magicRead;
+		// The effective per-entry cap may be smaller than the 5-byte
+		// %PDF- magic itself (e.g. when the remaining-total or
+		// remaining-ratio allowance is below 5). Reject immediately so
+		// the magic read cannot itself exceed the cap; no body bytes
+		// are read on this path.
+		if (bytesRead > maxEntryBytes) {
+			throw invalid("archive entry exceeds the effective size limit");
+		}
 
 		int read;
 		while ((read = in.read(buffer)) != -1) {
