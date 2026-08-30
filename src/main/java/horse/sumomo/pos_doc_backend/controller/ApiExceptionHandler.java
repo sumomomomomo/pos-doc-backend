@@ -14,6 +14,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -68,6 +69,17 @@ public class ApiExceptionHandler {
 				IntakeException.Code.MISSING_FILE.code(), IntakeException.Code.MISSING_FILE.detail());
 	}
 
+	@ExceptionHandler(MaxUploadSizeExceededException.class)
+	public ResponseEntity<Problem> handleMaxUploadSize(MaxUploadSizeExceededException e) {
+		// The servlet container rejected the multipart upload before it
+		// reached BoundedUploadSpooler. Map to the same stable 413 the
+		// spooler uses; the raw exception (which can embed container
+		// internals) is never logged.
+		log.warn("Request rejected (category=archive-too-large)");
+		IntakeException.Code code = IntakeException.Code.ARCHIVE_TOO_LARGE;
+		return problem(code.httpStatus(), code.code(), code.detail());
+	}
+
 	@ExceptionHandler(ConstraintViolationException.class)
 	public ResponseEntity<Problem> handleConstraintViolation(ConstraintViolationException e) {
 		log.warn("Request rejected (category=constraint-violation)");
@@ -120,9 +132,13 @@ public class ApiExceptionHandler {
 
 	@ExceptionHandler(Exception.class)
 	public ResponseEntity<Problem> handleUnexpected(Exception e) {
-		// Log the raw exception server-side only; the client receives a
-		// sanitized body.
-		log.error("Unexpected error while handling request", e);
+		// The client receives a sanitized body. Server-side we log only a
+		// stable category and the exception class name. The raw exception
+		// message and stack trace are deliberately NOT logged: database,
+		// broker, or storage exception text can embed connection strings,
+		// credentials, object keys, or other sensitive values.
+		log.error("Unexpected error while handling request (category=unexpected, type={})",
+				e.getClass().getSimpleName());
 		return problem(IntakeException.Code.INGESTION_INTAKE_FAILED.httpStatus(),
 				IntakeException.Code.INGESTION_INTAKE_FAILED.code(),
 				IntakeException.Code.INGESTION_INTAKE_FAILED.detail());

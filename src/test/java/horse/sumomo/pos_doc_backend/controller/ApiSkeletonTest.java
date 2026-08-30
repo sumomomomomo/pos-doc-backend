@@ -13,8 +13,10 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import horse.sumomo.pos_doc_backend.ingestion.application.IntakeException;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
 import horse.sumomo.pos_doc_backend.ingestion.application.UploadResult;
+import horse.sumomo.pos_doc_backend.ingestion.archive.ArchiveValidationException;
 import horse.sumomo.pos_doc_backend.persistence.entity.IngestionJobEntity;
 import horse.sumomo.pos_doc_backend.persistence.entity.PosRecordEntity;
 import horse.sumomo.pos_doc_backend.persistence.model.JobStatus;
@@ -22,6 +24,7 @@ import horse.sumomo.pos_doc_backend.persistence.repository.IngestionJobRepositor
 import horse.sumomo.pos_doc_backend.service.DummyIngestionJobService;
 import horse.sumomo.pos_doc_backend.service.DummyPosRecordService;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -193,6 +196,109 @@ class ApiSkeletonTest {
     void nonUuidPathParameterReturns400() throws Exception {
         mockMvc.perform(get("/pos-records/{id}", "not-a-uuid"))
                 .andExpect(status().isBadRequest());
+    }
+
+    // ------------------------------------------------------------------
+    // upload failure contract (Task 4-5, step 23)
+    // ------------------------------------------------------------------
+
+    private MockMultipartFile zipFile(String filename, byte[] bytes) {
+        return new MockMultipartFile("file", filename, "application/zip", bytes);
+    }
+
+    @Test
+    void oversizeUploadReturns413ArchiveTooLarge() throws Exception {
+        when(this.intakeService.intake(any(), any()))
+                .thenThrow(new IntakeException(IntakeException.Code.ARCHIVE_TOO_LARGE));
+
+        mockMvc.perform(multipart("/pos-records").file(zipFile("EREF-OVER.zip", new byte[] { 1 })))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(413))
+                .andExpect(jsonPath("$.code").value("ARCHIVE_TOO_LARGE"));
+    }
+
+    @Test
+    void unsupportedArchiveTypeReturns415() throws Exception {
+        when(this.intakeService.intake(any(), any()))
+                .thenThrow(new ArchiveValidationException(
+                        ArchiveValidationException.Category.UNSUPPORTED_ARCHIVE_TYPE, "not a zip"));
+
+        mockMvc.perform(multipart("/pos-records").file(zipFile("EREF-UNSUP.zip", new byte[] { 1 })))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(415))
+                .andExpect(jsonPath("$.code").value("UNSUPPORTED_ARCHIVE_TYPE"));
+    }
+
+    @Test
+    void invalidArchiveReturns422() throws Exception {
+        when(this.intakeService.intake(any(), any()))
+                .thenThrow(new ArchiveValidationException(
+                        ArchiveValidationException.Category.INVALID_ARCHIVE, "bad archive"));
+
+        mockMvc.perform(multipart("/pos-records").file(zipFile("EREF-BAD.zip", new byte[] { 1 })))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(422))
+                .andExpect(jsonPath("$.code").value("INVALID_ARCHIVE"));
+    }
+
+    @Test
+    void duplicateErefReturns409WithDistinctCode() throws Exception {
+        when(this.intakeService.intake(any(), any()))
+                .thenThrow(new IntakeException(IntakeException.Code.DUPLICATE_EREF_NUMBER));
+
+        mockMvc.perform(multipart("/pos-records")
+                        .file(zipFile("EREF-DUP.zip", new byte[] { 1 }))
+                        .param("policyNumber", "POLICY-DUP-001"))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.code").value("DUPLICATE_EREF_NUMBER"));
+    }
+
+    @Test
+    void duplicatePolicyReturns409WithDistinctCode() throws Exception {
+        when(this.intakeService.intake(any(), any()))
+                .thenThrow(new IntakeException(IntakeException.Code.DUPLICATE_POLICY_NUMBER));
+
+        mockMvc.perform(multipart("/pos-records")
+                        .file(zipFile("EREF-DUPPOL.zip", new byte[] { 1 }))
+                        .param("policyNumber", "POLICY-DUP-001"))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.code").value("DUPLICATE_POLICY_NUMBER"));
+    }
+
+    @Test
+    void internalErrorIsSanitized500AndLeaksNoSensitiveValues() throws Exception {
+        // A raw database failure with PII-ish text must not leak into the
+        // problem body; only the stable sanitized code/detail is returned.
+        when(this.intakeService.intake(any(), any()))
+                .thenThrow(new IntakeException(IntakeException.Code.INGESTION_INTAKE_FAILED,
+                        new RuntimeException("sqlite: UNIQUE constraint failed: eref=EREF-SECRET-001, key=archives/x/y.zip")));
+
+        mockMvc.perform(multipart("/pos-records")
+                        .file(zipFile("EREF-SECRET-001.zip", new byte[] { 1 }))
+                        .param("policyNumber", "POLICY-SECRET-001"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(500))
+                .andExpect(jsonPath("$.code").value("INGESTION_INTAKE_FAILED"))
+                // Sensitive values must be absent from the problem response.
+                .andExpect(result -> {
+                    String body = result.getResponse().getContentAsString();
+                    org.junit.jupiter.api.Assertions.assertFalse(body.contains("EREF-SECRET-001"),
+                            "problem body must not contain the eRef: " + body);
+                    org.junit.jupiter.api.Assertions.assertFalse(body.contains("POLICY-SECRET-001"),
+                            "problem body must not contain the policy number: " + body);
+                    org.junit.jupiter.api.Assertions.assertFalse(body.contains("sqlite"),
+                            "problem body must not contain database exception text: " + body);
+                    org.junit.jupiter.api.Assertions.assertFalse(body.contains("UNIQUE constraint"),
+                            "problem body must not contain raw constraint text: " + body);
+                });
     }
 
 }

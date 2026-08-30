@@ -12,6 +12,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -213,7 +214,7 @@ class OutboxIntakeTransactionIntegrationTest {
 		this.outboxEventRepository.saveAndFlush(event);
 		UUID id = event.getId();
 
-		assertTrue(this.outboxEventRepository.findPendingDue(created.plusSeconds(1)).stream()
+		assertTrue(this.outboxEventRepository.findPendingDue(created.plusSeconds(1), PageRequest.of(0, 100)).stream()
 				.anyMatch(e -> e.getId().equals(id)), "unpublished event must be pending");
 
 		OutboxEventEntity e = this.outboxEventRepository.findById(id).orElseThrow();
@@ -227,7 +228,7 @@ class OutboxIntakeTransactionIntegrationTest {
 				this.outboxEventRepository.findById(id).orElseThrow().getPublishedAt(),
 				"markPublished must keep the first publication instant");
 
-		assertFalse(this.outboxEventRepository.findPendingDue(created.plus(1, ChronoUnit.DAYS)).stream()
+		assertFalse(this.outboxEventRepository.findPendingDue(created.plus(1, ChronoUnit.DAYS), PageRequest.of(0, 100)).stream()
 				.anyMatch(e2 -> e2.getId().equals(id)), "published event must not be pending");
 	}
 

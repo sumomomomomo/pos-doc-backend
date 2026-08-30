@@ -4,6 +4,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -43,8 +45,11 @@ public class OutboxEventStateService {
 	 */
 	@Transactional(readOnly = true)
 	public List<OutboxSnapshot> dueSnapshots(Instant now, int limit) {
-		return this.repository.findPendingDue(now).stream()
-				.limit(limit)
+		// The batch limit is enforced at the database level via the Pageable
+		// argument (LIMIT on the JPQL query), so at most `limit` due rows are
+		// ever loaded into memory.
+		Pageable page = PageRequest.of(0, limit);
+		return this.repository.findPendingDue(now, page).stream()
 				.map(e -> new OutboxSnapshot(e.getId(), UUID.fromString(e.getAggregateId()),
 						e.getPayloadJson().getBytes(java.nio.charset.StandardCharsets.UTF_8)))
 				.toList();

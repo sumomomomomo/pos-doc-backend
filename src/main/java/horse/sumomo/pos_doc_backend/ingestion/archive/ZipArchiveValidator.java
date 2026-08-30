@@ -29,8 +29,11 @@ import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
  *   <li>The file must begin with a recognized ZIP signature
  *       ({@code PK\003\004}, {@code PK\005\006} for an empty archive, or
  *       {@code PK\007\008} for a spanning archive); anything else is
- *       rejected before a ZIP reader is opened. A {@code PK\005\006} file
- *       still ultimately fails because it contains no PDFs.</li>
+ *       rejected <em>before a ZIP reader is opened</em> with the
+ *       {@code UNSUPPORTED_ARCHIVE_TYPE} category (a file too small to carry
+ *       a signature is a malformed/truncated ZIP and is rejected with
+ *       {@code INVALID_ARCHIVE}). A {@code PK\005\006} file still ultimately
+ *       fails because it contains no PDFs.</li>
  *   <li>Between 1 and the configured maximum of non-directory entries.</li>
  *   <li>Every non-directory entry must have a case-insensitive {@code .pdf}
  *       suffix and begin with the bytes {@code %PDF-}.</li>
@@ -40,7 +43,10 @@ import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
  *   <li>Normalized entry paths must be unique, compared case-insensitively
  *       ({@link Locale#ROOT}) because later extraction runs on a
  *       case-sensitive filesystem while archives may be created on Windows.</li>
- *   <li>Per-entry and total uncompressed byte limits based on bytes read.</li>
+ *   <li>Per-entry and total uncompressed byte limits based on bytes read,
+ *       enforced <em>during</em> the read so a compression bomb is stopped at
+ *       the first limit-breaking chunk and is never inflated to the full
+ *       (possibly multi-gigabyte) size.</li>
  *   <li>Archive-level compression ratio (total uncompressed bytes divided by
  *       the spooled archive's actual compressed byte count) must not exceed
  *       the configured maximum once at least one compressed byte is known.
@@ -55,7 +61,9 @@ import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
 @Component
 public class ZipArchiveValidator {
 
-	private static final int BUFFER_SIZE = 8192;
+	// Package-visible so the unit test can pin the bounded-buffer chunk size
+	// when proving the per-entry read stops at the first limit-breaking chunk.
+	static final int BUFFER_SIZE = 8192;
 	private static final int SIGNATURE_LEN = 4;
 	private static final int PDF_MAGIC_LEN = 5;
 	private static final String PDF_SUFFIX = ".pdf";
@@ -107,14 +115,15 @@ public class ZipArchiveValidator {
 					throw invalid("duplicate entry path in the archive");
 				}
 
-				if (!normalizedPath.toLowerCase(Locale.ROOT).endsWith(PDF_SUFFIX)) {
+				if (!lower.endsWith(PDF_SUFFIX)) {
 					throw invalid("archive contains a non-PDF entry");
 				}
 
-				long entryBytes = readAndValidateEntry(zipFile, entry);
-				if (entryBytes > this.limits.maxEntryBytes()) {
-					throw invalid("an archive entry exceeds the per-entry size limit");
-				}
+				// totalUncompressed is the running total of all entries read
+				// before this one; the per-entry read is bounded by the
+				// configured per-entry limit so a bomb stops at the first
+				// limit-breaking chunk.
+				long entryBytes = readAndValidateEntry(zipFile, entry, this.limits.maxEntryBytes());
 				if (entry.getCompressedSize() == 0 && entryBytes > 0) {
 					throw invalid("archive entry has a suspicious zero compressed size");
 				}
@@ -147,6 +156,8 @@ public class ZipArchiveValidator {
 		try (InputStream in = Files.newInputStream(spooledFile)) {
 			int read = in.readNBytes(header, 0, SIGNATURE_LEN);
 			if (read < SIGNATURE_LEN) {
+				// Fewer than four bytes: the file is too small to carry any
+				// ZIP signature, i.e. it is malformed/truncated.
 				throw invalid("archive is too small to be a ZIP file");
 			}
 		}
@@ -158,7 +169,11 @@ public class ZipArchiveValidator {
 				|| equalsHeader(header, SIG_SPANNING)) {
 			return;
 		}
-		throw invalid("archive does not carry a recognized ZIP signature");
+		// Four or more bytes that are not a recognized ZIP signature: the
+		// upload is not a ZIP at all, so it is an unsupported archive type
+		// (415), not a syntactically-valid-but-unprocessable archive (422).
+		throw new ArchiveValidationException(ArchiveValidationException.Category.UNSUPPORTED_ARCHIVE_TYPE,
+				"archive does not carry a recognized ZIP signature");
 	}
 
 	private static ZipFile openZipFile(Path spooledFile) {
@@ -215,34 +230,55 @@ public class ZipArchiveValidator {
 
 	/**
 	 * Reads the entire entry through a bounded buffer, enforcing the PDF
-	 * signature and the per-entry limit on bytes actually read. Returns the
-	 * number of uncompressed bytes read.
+	 * signature and the per-entry limit <em>on every chunk read</em>. The
+	 * moment the running byte count of this entry would exceed
+	 * {@code maxEntryBytes}, the read is aborted and an exception is raised
+	 * so a compression bomb is never inflated beyond the first
+	 * limit-breaking chunk. Returns the number of uncompressed bytes read.
 	 */
-	private static long readAndValidateEntry(ZipFile zipFile, ZipEntry entry) throws IOException {
+	private static long readAndValidateEntry(ZipFile zipFile, ZipEntry entry, long maxEntryBytes) throws IOException {
+		try (InputStream in = zipFile.getInputStream(entry)) {
+			return readAndValidatePdf(in, maxEntryBytes);
+		}
+	}
+
+	/**
+	 * Reads a PDF entry body from {@code in} through a bounded buffer,
+	 * enforcing the {@code %PDF-} signature and the per-entry limit on every
+	 * chunk read. Package-visible and stream-oriented so the unit test can
+	 * wrap a counting stream and prove the read stops at the first
+	 * limit-breaking chunk.
+	 *
+	 * @param in the uncompressed entry stream
+	 * @param maxEntryBytes the per-entry uncompressed byte limit
+	 * @return the number of uncompressed bytes read (<= maxEntryBytes)
+	 * @throws IOException when the underlying stream fails
+	 */
+	static long readAndValidatePdf(InputStream in, long maxEntryBytes) throws IOException {
 		long bytesRead = 0L;
 		byte[] magic = new byte[PDF_MAGIC_LEN];
 		byte[] buffer = new byte[BUFFER_SIZE];
 
-		try (InputStream in = zipFile.getInputStream(entry)) {
-			int magicRead = 0;
-			while (magicRead < PDF_MAGIC_LEN) {
-				int r = in.read(magic, magicRead, PDF_MAGIC_LEN - magicRead);
-				if (r == -1) {
-					throw invalid("PDF entry is missing its signature bytes");
-				}
-				magicRead += r;
+		int magicRead = 0;
+		while (magicRead < PDF_MAGIC_LEN) {
+			int r = in.read(magic, magicRead, PDF_MAGIC_LEN - magicRead);
+			if (r == -1) {
+				throw invalid("PDF entry is missing its signature bytes");
 			}
-			if (!startsWithPdfMagic(magic)) {
-				throw invalid("archive entry does not begin with the PDF signature");
-			}
-			bytesRead += magicRead;
+			magicRead += r;
+		}
+		if (!startsWithPdfMagic(magic)) {
+			throw invalid("archive entry does not begin with the PDF signature");
+		}
+		bytesRead += magicRead;
 
-			int read;
-			while ((read = in.read(buffer)) != -1) {
-				bytesRead += read;
-				if (bytesRead > Integer.MAX_VALUE) {
-					throw invalid("archive entry exceeds the per-entry size limit");
-				}
+		int read;
+		while ((read = in.read(buffer)) != -1) {
+			bytesRead += read;
+			if (bytesRead > maxEntryBytes) {
+				// Stop at the first chunk that pushes this entry over its
+				// per-entry limit; do not keep inflating the bomb.
+				throw invalid("archive entry exceeds the per-entry size limit");
 			}
 		}
 		return bytesRead;

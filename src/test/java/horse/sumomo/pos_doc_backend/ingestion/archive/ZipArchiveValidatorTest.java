@@ -121,8 +121,20 @@ class ZipArchiveValidatorTest {
 	}
 
 	@Test
-	void nonZipBytesAreRejected() throws Exception {
+	void nonZipBytesAreRejectedAsUnsupportedArchiveType() throws Exception {
+		// Four or more bytes that are not a recognized ZIP signature are an
+		// unsupported archive type (415), not a malformed archive (422).
 		Files.write(this.spooledFile, "this is definitely not a zip archive at all".getBytes(StandardCharsets.UTF_8));
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(DEFAULTS).validate(this.spooledFile, fileBytes()));
+		assertEquals(ArchiveValidationException.Category.UNSUPPORTED_ARCHIVE_TYPE, e.getCategory());
+	}
+
+	@Test
+	void fileTooSmallForASignatureIsRejectedAsInvalidArchive() throws Exception {
+		// Fewer than four bytes cannot carry any ZIP signature, so the file
+		// is malformed/truncated (422), not an unsupported type (415).
+		Files.write(this.spooledFile, new byte[] { 'P', 'K', 0x03 });
 		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
 				() -> new ZipArchiveValidator(DEFAULTS).validate(this.spooledFile, fileBytes()));
 		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
@@ -230,6 +242,30 @@ class ZipArchiveValidatorTest {
 		writeZip(Map.of("doc.pdf", java.util.Arrays.copyOf(PDF, PDF.length + 1)));
 		assertThrows(ArchiveValidationException.class,
 				() -> new ZipArchiveValidator(small).validate(this.spooledFile, fileBytes()));
+	}
+
+	@Test
+	void perEntryReadStopsAtTheFirstLimitBreakingChunk() throws Exception {
+		// The bounded buffer is read in BUFFER_SIZE chunks. With a per-entry
+		// limit of exactly one buffer's worth of payload (after the 5-byte
+		// PDF magic), the read must abort on the second chunk and must not
+		// inflate the rest of the (much larger) entry.
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long limit = buffer - 5L; // magic (5) + one full buffer chunk
+		int totalPayload = 8 * buffer; // far beyond the limit
+		byte[] content = new byte[totalPayload];
+		System.arraycopy(PDF, 0, content, 0, PDF.length);
+		java.util.Arrays.fill(content, PDF.length, totalPayload, (byte) 'a');
+
+		CountingInputStream counting = new CountingInputStream(new java.io.ByteArrayInputStream(content));
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> ZipArchiveValidator.readAndValidatePdf(counting, limit));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+		// Magic (5) + the first full chunk that stays within the limit. The
+		// second chunk would push the total past the limit, so it must never
+		// be read.
+		assertEquals(5L + buffer, counting.count,
+				"the read must stop at the first limit-breaking chunk");
 	}
 
 	@Test
@@ -389,6 +425,39 @@ class ZipArchiveValidatorTest {
 		out.write((int) ((value >> 8) & 0xFF));
 		out.write((int) ((value >> 16) & 0xFF));
 		out.write((int) ((value >> 24) & 0xFF));
+	}
+
+	/**
+	 * An input stream that counts how many bytes were actually read, used to
+	 * prove the per-entry read stops at the first limit-breaking chunk.
+	 */
+	private static final class CountingInputStream extends InputStream {
+
+		private final InputStream delegate;
+		long count = 0L;
+
+		private CountingInputStream(InputStream delegate) {
+			this.delegate = delegate;
+		}
+
+		@Override
+		public int read() throws IOException {
+			int b = this.delegate.read();
+			if (b != -1) {
+				this.count++;
+			}
+			return b;
+		}
+
+		@Override
+		public int read(byte[] buf, int off, int len) throws IOException {
+			int r = this.delegate.read(buf, off, len);
+			if (r != -1) {
+				this.count += r;
+			}
+			return r;
+		}
+
 	}
 
 }

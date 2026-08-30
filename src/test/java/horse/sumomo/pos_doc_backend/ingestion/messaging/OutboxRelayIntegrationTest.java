@@ -25,6 +25,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -205,7 +206,7 @@ class OutboxRelayIntegrationTest {
 		// 5/6: published stamp set, and the row is no longer pending.
 		OutboxEventEntity saved = this.repository.findById(eventId).orElseThrow();
 		assertNotNull(saved.getPublishedAt(), "a positive confirm must set publishedAt");
-		assertTrue(this.repository.findPendingDue(Instant.now()).stream()
+		assertTrue(this.repository.findPendingDue(Instant.now(), PageRequest.of(0, 100)).stream()
 				.noneMatch(e -> e.getId().equals(eventId)), "published row must not be pending");
 	}
 
