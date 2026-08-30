@@ -1,5 +1,64 @@
 # Tasks 4–5 — Sprint changes report
 
+> **Revision history**
+>
+> 1. `45637d6` — initial implementation (ZIP intake + RabbitMQ outbox).
+> 2. `1e3109d` — fixture helper.
+> 3. `3d8e93e` — first corrective commit (review findings 1–7).
+> 4. *this commit* — second corrective commit:
+>    - **Finding 8**: enforce *all* ZIP expansion limits during each entry read
+>      (pre-entry `effectiveEntryLimit` arithmetic with overflow-safe ratio
+>      product; per-entry, total, and ratio cap all enforced *during* the
+>      bounded read, not only after the entry finishes).
+>    - **Finding 9**: the previous `UploadSizeRejectionIntegrationTest`
+>      exercised a MockMvc-only path that bypassed the servlet container's
+>      multipart parser, so it proved the application-level mapping but not
+>      that `MaxUploadSizeExceededException` was handled. The test class
+>      has been split into three layers:
+>      - `MaxUploadSizeAdviceTest` — direct invocation of
+>        `ApiExceptionHandler.handleMaxUploadSize` with a real
+>        `MaxUploadSizeExceededException`, asserting `413` /
+>        `application/problem+json` / `ARCHIVE_TOO_LARGE` / sanitized
+>        detail.
+>      - `UploadSizeRealHttpRejectionTest` — a real HTTP integration test
+>        using `@SpringBootTest(webEnvironment = RANDOM_PORT)` that sends
+>        a 10 MiB + 1 byte multipart request over a raw `HttpURLConnection`
+>        to the embedded Tomcat. The container's multipart parser raises
+>        `MaxUploadSizeExceededException` before the request reaches
+>        `BoundedUploadSpooler`; the advice maps it to the 413 problem
+>        response. The intake service is mocked and must never be invoked.
+>        MinIO and RabbitMQ are not contacted.
+>      - `ApiSkeletonTest.oversizeUploadReturns413ArchiveTooLarge` (already
+>        present) keeps the MockMvc-based application-level 413 mapping
+>        test.
+>      The misleading comment that claimed MockMvc exercises servlet
+>      multipart parsing has been removed.
+>
+> See §8.8 below for the per-finding diffs and the new test coverage.
+>
+> ## Verification (this commit)
+>
+> 1. `mvnw.cmd clean verify` → **Tests run: 151, Failures: 0, Errors: 0,
+>    Skipped: 0** — BUILD SUCCESS (run twice, idempotent).
+> 2. `docker compose --env-file .env.example config --quiet` → exit 0.
+> 3. `bash scripts/verify-container-stack.sh` →
+>    **`verify-container-stack: ALL CHECKS PASSED`** (full stack: MinIO,
+>    RabbitMQ, backend; upload 202; job `QUEUED`; queue message has only
+>    identifiers; durable message survives RabbitMQ restart; MinIO marker
+>    survives restart; SQLite file present across restarts; backend
+>    remains healthy across restarts).
+> 4. `mvnw.cmd clean verify` (post-stack) → **Tests run: 151, Failures: 0,
+>    Errors: 0, Skipped: 0** — BUILD SUCCESS.
+> 5. `git status --short` → 5 paths (1 modified production file, 1 deleted
+>    test file, 1 modified test file, 2 new test files).
+>
+> All Testcontainers-based integration tests (real MinIO, real RabbitMQ,
+> real Spring context) executed with zero skips.
+>
+> ---
+
+# Tasks 4–5 — Sprint changes report
+
 Companion document to [4-5_zip_rabbitmq.md](4-5_zip_rabbitmq.md). This report
 describes, end to end, what the sprint implementing Tasks 4–5 (secure ZIP
 intake + reliable RabbitMQ enqueue) built, and the corrective follow-up that
@@ -420,6 +479,105 @@ accidental replacement fails the build.
   (330 bytes) SHA-256:
   `1ce96e72137fd1b084410d8f1f9154bce9dfd435fc9e9ab6a8ea340968e362a0`.
 
+### 8.8 (Blocking) ZIP expansion limits must be enforced *during* each entry read
+
+The previous corrective commit enforced the per-entry limit during the
+bounded read but still only checked `maxUncompressedBytes` and
+`maxCompressionRatio` **after** the entire entry had been decompressed. A
+crafted archive could therefore consume memory up to the per-entry cap
+before being rejected by the post-entry check.
+
+**Fix:** [`ZipArchiveValidator`](../src/main/java/horse/sumomo/pos_doc_backend/ingestion/archive/ZipArchiveValidator.java)
+now computes, *before* opening each entry's input stream, the
+[`effectiveEntryLimit`](../src/main/java/horse/sumomo/pos_doc_backend/ingestion/archive/ZipArchiveValidator.java#L155-L196)
+which is the minimum of three allowances, all computed with overflow-safe
+arithmetic:
+
+```text
+remainingTotal = maxUncompressedBytes - totalUncompressedBeforeEntry
+maximumRatioBytes = archiveCompressedBytes * maxCompressionRatio   (Math.multiplyExact)
+remainingRatio = maximumRatioBytes - totalUncompressedBeforeEntry
+effectiveEntryLimit = min(maxEntryBytes, remainingTotal, remainingRatio)
+```
+
+- If any remaining allowance is zero or negative, the entry is rejected
+  **before** any bytes are read.
+- The ratio product is computed with
+  [`Math.multiplyExact`](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Math.html#multiplyExact(long,long));
+  on overflow the validator fails closed with `INVALID_ARCHIVE` rather
+  than silently wrapping into a permissive cap.
+- The cap is passed into the per-entry read loop, which already aborts on
+  the first limit-breaking chunk, so the read can never inflate beyond
+  one buffered chunk past the cap.
+- The post-entry checks are kept as defensive assertions to guard
+  against future refactors.
+
+**New tests** in [`ZipArchiveValidatorTest`](../src/test/java/horse/sumomo/pos_doc_backend/ingestion/archive/ZipArchiveValidatorTest.java):
+
+- `effectiveEntryLimitIsTheMinimumOfTheThreeAllowances` — exercises
+  small, large, and partially-consumed archive scenarios and asserts the
+  minimum is taken.
+- `effectiveEntryLimitRejectsImmediatelyWhenTotalBudgetIsExhausted` —
+  pre-entry rejection when the remaining total is zero.
+- `effectiveEntryLimitRejectsImmediatelyWhenRatioBudgetIsExhausted` —
+  pre-entry rejection when the remaining ratio is zero.
+- `effectiveEntryLimitOverflowsFailClosed` — `archive * ratio` overflow
+  is rejected as `INVALID_ARCHIVE`.
+- `totalUncompressedBudgetAbortsFirstEntryAtTheFirstLimitBreakingChunk`
+  and `totalBudgetAbortsSecondEntryAtTheFirstLimitBreakingChunk` —
+  full-archive proofs that the second entry is rejected pre-entry once
+  the first entry has consumed the total budget.
+- `compressionRatioBudgetAbortsFirstEntryAtTheFirstLimitBreakingChunk`
+  — full-archive proof that the per-entry cap is the binding constraint
+  when the archive is highly compressible.
+- `realZipEntryReadStopsAtTheFirstLimitBreakingChunkForPerEntryLimit` —
+  reads through a real `ZipFile` entry wrapped in a counting stream and
+  asserts the read stops at `5 + BUFFER_SIZE` bytes (magic + the first
+  full buffer chunk), with `counting.count < entry.getSize()` to prove
+  the stream was not read to completion.
+- `readingAbortsAtTheFirstLimitBreakingChunkWhenTotalBudgetIsNearlyExhausted`
+  — direct `readAndValidatePdf` proof of the chunk-level abort.
+
+ZIP metadata (`ZipEntry.getSize()` / `getCompressedSize()`) is never
+trusted for enforcement. PDF contents are never buffered; only the
+bounded `BUFFER_SIZE` chunks are read.
+
+### 8.9 (Blocking) Oversize-upload test did not exercise servlet multipart parsing
+
+The previous [`UploadSizeRejectionIntegrationTest`](../src/test/java/horse/sumomo/pos_doc_backend/controller/UploadSizeRejectionIntegrationTest.java)
+used `MockMvcRequestBuilders.multipart`, which builds an already-parsed
+`MockMultipartFile` and therefore bypasses the servlet container's
+multipart parser. The test proved the application-level mapping but
+not that Spring's `MaxUploadSizeExceededException` was handled.
+
+**Fix:** the single test was replaced by three test classes, each
+covering one layer of the contract:
+
+- [`MaxUploadSizeAdviceTest`](../src/test/java/horse/sumomo/pos_doc_backend/controller/MaxUploadSizeAdviceTest.java)
+  — boots only the `ApiExceptionHandler` bean and invokes
+  `handleMaxUploadSize` directly with a real
+  `MaxUploadSizeExceededException`. Asserts `413`,
+  `application/problem+json`, `ARCHIVE_TOO_LARGE`, sanitized detail, and
+  the absence of any raw exception text in the body.
+- [`UploadSizeRealHttpRejectionTest`](../src/test/java/horse/sumomo/pos_doc_backend/controller/UploadSizeRealHttpRejectionTest.java)
+  — `@SpringBootTest(webEnvironment = RANDOM_PORT)` boots the full
+  Spring context on a random port, then sends a real multipart HTTP
+  request containing 10 MiB + 1 byte to the embedded Tomcat over a raw
+  `HttpURLConnection`. The container's multipart parser raises
+  `MaxUploadSizeExceededException`; the advice maps it to the 413
+  problem response. The intake service is mocked and is asserted to
+  have never been invoked. The test does not contact MinIO or RabbitMQ
+  and uses a temporary SQLite database. The misleading comment that
+  claimed MockMvc exercises servlet multipart parsing was removed.
+- The pre-existing
+  [`ApiSkeletonTest.oversizeUploadReturns413ArchiveTooLarge`](../src/test/java/horse/sumomo/pos_doc_backend/controller/ApiSkeletonTest.java)
+  continues to cover the application-level MockMvc path (mocked service
+  throws `IntakeException(ARCHIVE_TOO_LARGE)`).
+
+Together these three tests cover the full chain: the advice in
+isolation, the servlet container rejection in integration, and the
+application-level mapping via MockMvc.
+
 ---
 
 ## 9. Verification
@@ -427,26 +585,51 @@ accidental replacement fails the build.
 Commands executed (Windows `cmd.exe`, Git Bash for the shell script):
 
 ```text
-mvnw.cmd clean verify                                    # PASS
+mvnw.cmd clean verify                                    # PASS  (run 1)
+mvnw.cmd clean verify                                    # PASS  (run 2)
 docker compose --env-file .env.example config --quiet    # PASS
-python scripts/make-fixture.py                           # PASS (hash matches)
+bash scripts/verify-container-stack.sh                   # ALL CHECKS PASSED
+mvnw.cmd clean verify                                    # PASS  (post-stack)
+git status --short                                       # 5 paths (1 modified production, 1 modified test, 1 deleted test, 2 new tests)
 ```
 
-Final Maven result:
+Final Maven result (after this commit):
 
 ```text
-Tests run: 139, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 151, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
 All Docker/Testcontainers-based tests executed against real containers
 (no skips): `PosArchiveIntakeIntegrationTest` (7), `OutboxRelayIntegrationTest`
-(5), `FullIntakeIntegrationTest` (1), plus MinIO/SQLite persistence tests.
+(5), `FullIntakeIntegrationTest` (1), `MinioObjectStorageIntegrationTest`,
+plus MinIO/SQLite persistence tests. The new real-HTTP
+`UploadSizeRealHttpRejectionTest` (1) successfully sent a 10 MiB + 1
+byte multipart upload to the embedded Tomcat on a random port and
+asserted the 413 response.
 
-Not independently rerun in this session (requires the full Compose stack):
-`scripts/verify-container-stack.sh` whole-stack flow. It was unchanged in
-this corrective commit and was verified in the prior sprint; the Compose
-configuration was re-validated above.
+The whole-stack verification script (`scripts/verify-container-stack.sh`)
+passed every check end-to-end:
+
+- `== compose config ==` — exit 0.
+- `== up --detach --wait ==` — all four services healthy
+  (backend, minio, minio-init, rabbitmq).
+- `== minio live check ==` → `minio: live`.
+- `== backend health check ==` → `backend: UP`.
+- `== sqlite file check ==` → `sqlite: database file present in backend container`.
+- `== minio persistence marker ==` → `minio: marker uploaded`.
+- `== restart minio ==` → `minio: data survived container restart`.
+- `== restart backend ==` → `backend: healthy after restart`.
+- `== rabbitmq health check ==` → `rabbitmq: healthy`.
+- `== rabbitmq management API check ==` → `rabbitmq: management API authenticated`.
+- `== stack upload (committed fixture) ==` → `upload: 202 with posRecordId and jobId`.
+- `== job queryable and QUEUED ==` → `job: QUEUED`.
+- `== queue ready message count ==` → `queue: exactly one ready message`.
+- `== message body contains identifiers only ==` → `message: identifiers only, no fixture metadata`.
+- `== restart rabbitmq ==` → `rabbitmq: healthy after restart`.
+- `== verify durable message survived rabbitmq restart ==` → `queue: persistent message survived rabbitmq restart`.
+- `== restart backend after rabbitmq restart ==` → `job: still QUEUED after backend restart`.
+- `verify-container-stack: ALL CHECKS PASSED`.
 
 ---
 

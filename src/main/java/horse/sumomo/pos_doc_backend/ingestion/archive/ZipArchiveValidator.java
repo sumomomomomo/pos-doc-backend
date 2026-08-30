@@ -119,22 +119,28 @@ public class ZipArchiveValidator {
 					throw invalid("archive contains a non-PDF entry");
 				}
 
-				// totalUncompressed is the running total of all entries read
-				// before this one; the per-entry read is bounded by the
-				// configured per-entry limit so a bomb stops at the first
-				// limit-breaking chunk.
-				long entryBytes = readAndValidateEntry(zipFile, entry, this.limits.maxEntryBytes());
+				// Compute, *before* reading this entry, the maximum number of
+				// bytes this entry is allowed to produce. Three allowances
+				// constrain it: the configured per-entry limit, the remaining
+				// total-uncompressed budget, and the remaining
+				// archive-compression-ratio budget. The smallest of the three
+				// is the per-entry cap, so the read loop aborts at the first
+				// chunk that exceeds any of them. ZIP metadata
+				// (getSize()/getCompressedSize()) is never trusted.
+				long effectiveEntryLimit = effectiveEntryLimit(
+						totalUncompressed, archiveCompressedBytes);
+
+				long entryBytes = readAndValidateEntry(zipFile, entry, effectiveEntryLimit);
 				if (entry.getCompressedSize() == 0 && entryBytes > 0) {
 					throw invalid("archive entry has a suspicious zero compressed size");
 				}
 				totalUncompressed += entryBytes;
-				if (totalUncompressed > this.limits.maxUncompressedBytes()) {
-					throw invalid("archive exceeds the total uncompressed size limit");
-				}
-				if (archiveCompressedBytes > 0
-						&& totalUncompressed > archiveCompressedBytes * this.limits.maxCompressionRatio()) {
-					throw invalid("archive exceeds the maximum compression ratio");
-				}
+				// Defensive post-entry assertions. The read loop already
+				// aborts at the first limit-breaking chunk, so these should
+				// only ever trip on a logic bug; they are kept so a future
+				// refactor cannot silently relax the cap.
+				assertWithinTotalLimit(totalUncompressed);
+				assertWithinRatioLimit(totalUncompressed, archiveCompressedBytes);
 			}
 		}
 		catch (ZipException e) {
@@ -149,6 +155,80 @@ public class ZipArchiveValidator {
 		}
 
 		return new ValidatedArchive(pdfCount, totalUncompressed);
+	}
+
+	/**
+	 * Computes the maximum number of uncompressed bytes the next entry is
+	 * allowed to produce, given the bytes already read by previous entries.
+	 *
+	 * <p>The cap is the minimum of three allowances, all computed with
+	 * overflow-safe arithmetic:
+	 * <ol>
+	 *   <li>The configured {@code maxEntryBytes}.</li>
+	 *   <li>{@code maxUncompressedBytes - totalUncompressedBeforeEntry} (the
+	 *       remaining total-uncompressed budget). When this is zero or
+	 *       negative the archive has already exhausted the total budget and
+	 *       is rejected immediately, before any bytes are read.</li>
+	 *   <li>{@code archiveCompressedBytes * maxCompressionRatio -
+	 *       totalUncompressedBeforeEntry} (the remaining ratio budget). The
+	 *       ratio-side product is computed using {@link Math#multiplyExact}
+	 *       so an overflowed configuration (or a hostile compressed size)
+	 *       fails fast instead of silently wrapping into a permissive cap.
+	 *       When the remaining ratio budget is zero or negative, the
+	 *       archive is rejected immediately.</li>
+	 * </ol>
+	 *
+	 * <p>Package-visible for unit-test verification of the pre-entry
+	 * arithmetic.
+	 *
+	 * @param totalUncompressedBeforeEntry bytes already produced by previous
+	 *            entries (>= 0)
+	 * @param archiveCompressedBytes the spooled archive's actual compressed
+	 *            byte count; must be > 0
+	 * @return the maximum number of bytes the next entry may produce
+	 * @throws ArchiveValidationException when any remaining allowance is
+	 *             zero or negative
+	 */
+	long effectiveEntryLimit(long totalUncompressedBeforeEntry, long archiveCompressedBytes) {
+		if (totalUncompressedBeforeEntry < 0) {
+			throw new IllegalArgumentException("totalUncompressedBeforeEntry must be >= 0");
+		}
+		if (archiveCompressedBytes <= 0) {
+			throw new IllegalArgumentException("archiveCompressedBytes must be > 0");
+		}
+
+		long remainingTotal = this.limits.maxUncompressedBytes() - totalUncompressedBeforeEntry;
+		if (remainingTotal <= 0) {
+			throw invalid("archive exceeds the total uncompressed size limit");
+		}
+
+		long maximumRatioBytes;
+		try {
+			maximumRatioBytes = Math.multiplyExact(archiveCompressedBytes, this.limits.maxCompressionRatio());
+		}
+		catch (ArithmeticException e) {
+			throw invalid("archive compression ratio configuration overflows", e);
+		}
+		long remainingRatio = maximumRatioBytes - totalUncompressedBeforeEntry;
+		if (remainingRatio <= 0) {
+			throw invalid("archive exceeds the maximum compression ratio");
+		}
+
+		long entryCap = this.limits.maxEntryBytes();
+		return Math.min(entryCap, Math.min(remainingTotal, remainingRatio));
+	}
+
+	private void assertWithinTotalLimit(long totalUncompressed) {
+		if (totalUncompressed > this.limits.maxUncompressedBytes()) {
+			throw invalid("archive exceeds the total uncompressed size limit");
+		}
+	}
+
+	private void assertWithinRatioLimit(long totalUncompressed, long archiveCompressedBytes) {
+		if (archiveCompressedBytes > 0
+				&& totalUncompressed > archiveCompressedBytes * this.limits.maxCompressionRatio()) {
+			throw invalid("archive exceeds the maximum compression ratio");
+		}
 	}
 
 	private static void checkSignature(Path spooledFile) {

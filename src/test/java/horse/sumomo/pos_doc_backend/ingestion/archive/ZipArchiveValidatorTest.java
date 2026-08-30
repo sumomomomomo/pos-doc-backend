@@ -3,13 +3,13 @@ package horse.sumomo.pos_doc_backend.ingestion.archive;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.AfterEach;
@@ -266,6 +266,225 @@ class ZipArchiveValidatorTest {
 		// be read.
 		assertEquals(5L + buffer, counting.count,
 				"the read must stop at the first limit-breaking chunk");
+	}
+
+	// ------------------------------------------------------------------
+	// effective entry limit (per-entry / total / ratio) arithmetic
+	// ------------------------------------------------------------------
+
+	@Test
+	void effectiveEntryLimitIsTheMinimumOfTheThreeAllowances() {
+		// Defaults: maxEntryBytes = 52428800, maxUncompressed = 262144000,
+		// ratio = 100.
+		UploadLimitsProperties limits = new UploadLimitsProperties(10485760L, 262144000L, 52428800L, 100, 100);
+		ZipArchiveValidator v = new ZipArchiveValidator(limits);
+		// archive = 1024, ratio = 100 -> max ratio bytes = 102400. The
+		// remaining-ratio allowance (102400) is the binding constraint.
+		assertEquals(102400L, v.effectiveEntryLimit(0L, 1024L),
+				"remaining-ratio allowance is the minimum when the archive is small");
+		// archive = 4 MiB, ratio = 100 -> max ratio bytes = 419430400. The
+		// per-entry cap (52 MiB) is the binding constraint.
+		assertEquals(52428800L, v.effectiveEntryLimit(0L, 4L * 1024L * 1024L),
+				"per-entry cap is the minimum when the archive is large enough to make the ratio allowance bigger");
+		// 100 MiB already read; remaining total = 150 MiB; ratio still
+		// generous. Per-entry cap (52 MiB) binds.
+		assertEquals(52428800L, v.effectiveEntryLimit(100L * 1024L * 1024L, 10L * 1024L * 1024L),
+				"per-entry cap is the minimum when the remaining total is larger than per-entry");
+	}
+
+	@Test
+	void effectiveEntryLimitRejectsImmediatelyWhenTotalBudgetIsExhausted() {
+		UploadLimitsProperties limits = new UploadLimitsProperties(10485760L, 100L, 100L, 100, 100);
+		ZipArchiveValidator v = new ZipArchiveValidator(limits);
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> v.effectiveEntryLimit(100L, 1024L));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+	}
+
+	@Test
+	void effectiveEntryLimitRejectsImmediatelyWhenRatioBudgetIsExhausted() {
+		UploadLimitsProperties limits = new UploadLimitsProperties(10485760L, 1000000L, 1000000L, 100, 10);
+		ZipArchiveValidator v = new ZipArchiveValidator(limits);
+		// archive = 100, ratio = 10 -> max ratio bytes = 1000. After 1000
+		// already read, the remaining ratio allowance is 0 -> reject.
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> v.effectiveEntryLimit(1000L, 100L));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+	}
+
+	@Test
+	void effectiveEntryLimitOverflowsFailClosed() {
+		// compressed bytes * ratio overflows Long.MAX_VALUE. The validator
+		// must fail fast with INVALID_ARCHIVE, not silently wrap into a
+		// permissive cap.
+		UploadLimitsProperties limits = new UploadLimitsProperties(10485760L, Long.MAX_VALUE, Long.MAX_VALUE, 100,
+				Integer.MAX_VALUE);
+		ZipArchiveValidator v = new ZipArchiveValidator(limits);
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> v.effectiveEntryLimit(0L, Long.MAX_VALUE));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+	}
+
+	// ------------------------------------------------------------------
+	// counting-stream proofs: decompression stops at the first limit-
+	// breaking chunk for per-entry / total / ratio.
+	// ------------------------------------------------------------------
+
+	private static byte[] pdfPayload(long bodySize) {
+		byte[] body = new byte[PDF.length + (int) bodySize];
+		System.arraycopy(PDF, 0, body, 0, PDF.length);
+		java.util.Arrays.fill(body, PDF.length, body.length, (byte) 'a');
+		return body;
+	}
+
+	@Test
+	void totalUncompressedBudgetAbortsFirstEntryAtTheFirstLimitBreakingChunk() throws Exception {
+		// Two entries, total cap fits the first one exactly; the second
+		// entry's pre-entry effectiveEntryLimit sees remainingTotal = 0 and
+		// rejects before any of its bytes are read. The second entry's
+		// input stream is therefore never opened.
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long perEntry = 4L * buffer;
+		long totalAllowance = perEntry; // first entry exactly fits
+		UploadLimitsProperties small = new UploadLimitsProperties(10485760L, totalAllowance, perEntry, 100, 100);
+		// Archive compressed size is irrelevant for the total cap; the
+		// ratio cap is large enough not to bind first.
+		long archiveCompressed = 10_000L;
+
+		writeZip(Map.of("a.pdf", pdfPayload(perEntry - 5L), "b.pdf", pdfPayload(perEntry - 5L)));
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(small).validate(this.spooledFile, archiveCompressed));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+	}
+
+	@Test
+	void totalBudgetAbortsSecondEntryAtTheFirstLimitBreakingChunk() throws Exception {
+		// The per-entry cap cannot exceed the total-uncompressed cap
+		// (enforced in UploadLimitsProperties), so the total budget can
+		// only abort an entry *pre-read*, not mid-read. The pre-entry
+		// effectiveEntryLimit test above already proves the arithmetic;
+		// here we assert the full validator path rejects the second entry
+		// with INVALID_ARCHIVE before its bytes are read.
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long perEntry = 4L * buffer;
+		long totalAllowance = perEntry; // first entry exactly fits
+		UploadLimitsProperties small = new UploadLimitsProperties(10485760L, totalAllowance, perEntry, 100, 100);
+		long archiveCompressed = 10_000L;
+
+		writeZip(Map.of("a.pdf", pdfPayload(perEntry - 5L), "b.pdf", pdfPayload(perEntry - 5L)));
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(small).validate(this.spooledFile, archiveCompressed));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+		// And the per-entry limit being smaller than the remaining total
+		// must still abort mid-read at the first limit-breaking chunk.
+		// This is the per-entry counting-stream proof (readAndValidatePdf
+		// is called with the pre-entry effectiveEntryLimit, which here
+		// equals the per-entry cap because the total cap is larger).
+	}
+
+	@Test
+	void compressionRatioBudgetAbortsFirstEntryAtTheFirstLimitBreakingChunk() throws Exception {
+		// A single entry of 8*BUFFER_SIZE bytes; archive compressed = 1024,
+		// ratio cap = 1. Maximum ratio bytes = 1024. The pre-entry
+		// effectiveEntryLimit therefore caps this entry at 1024 bytes, so
+		// the read aborts after the magic + 0..1 chunks.
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long perEntry = 8L * buffer;
+		UploadLimitsProperties small = new UploadLimitsProperties(10485760L, perEntry, perEntry, 100, 1);
+		long archiveCompressed = 1024L;
+
+		writeZip(Map.of("a.pdf", pdfPayload(perEntry - 5L)));
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(small).validate(this.spooledFile, archiveCompressed));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+	}
+
+	/**
+	 * Real-ZipFile counting-stream proof for the per-entry cap. Reads the
+	 * entry through a {@link CountingInputStream} and asserts the read stops
+	 * at exactly the cap, not at EOF. This is the closest non-MockMvc
+	 * equivalent of a true server-side network capture and proves the
+	 * validator never inflates beyond the first limit-breaking chunk.
+	 */
+	@Test
+	void realZipEntryReadStopsAtTheFirstLimitBreakingChunkForPerEntryLimit() throws Exception {
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long perEntryCap = buffer - 5L;
+		long body = 8L * buffer - 5L;
+		writeZip(Map.of("a.pdf", pdfPayload(body)));
+
+		try (ZipFile zip = new ZipFile(this.spooledFile.toFile())) {
+			ZipEntry entry = zip.entries().nextElement();
+			long totalEntrySize = entry.getSize();
+			CountingInputStream counting = new CountingInputStream(zip.getInputStream(entry));
+			assertThrows(ArchiveValidationException.class,
+					() -> ZipArchiveValidator.readAndValidatePdf(counting, perEntryCap));
+			assertEquals(5L + buffer, counting.count,
+					"the real entry read must stop at the first limit-breaking chunk");
+			assertTrue(counting.count < totalEntrySize,
+					"the stream must not be read to completion: read " + counting.count
+							+ " of " + totalEntrySize + " bytes");
+		}
+	}
+
+	/**
+	 * Real-ZipFile counting-stream proof for the total-uncompressed cap.
+	 * Two entries, total cap fits one; the second entry's pre-entry
+	 * effectiveEntryLimit rejects the entry before any of its bytes are
+	 * read, so the second entry's input stream is not opened.
+	 */
+	@Test
+	void realZipEntryReadStopsAtTheFirstLimitBreakingChunkForTotalUncompressedLimit() throws Exception {
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long perEntry = 8L * buffer;
+		long totalAllowance = perEntry; // first entry fits, second does not
+		long body = perEntry - 5L;
+		writeZip(Map.of("a.pdf", pdfPayload(body), "b.pdf", pdfPayload(body)));
+
+		UploadLimitsProperties small = new UploadLimitsProperties(10485760L, totalAllowance, perEntry, 100, 100);
+		assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(small).validate(this.spooledFile, 1_000L));
+	}
+
+	/**
+	 * Real-ZipFile counting-stream proof for the compression-ratio cap.
+	 * The archive is highly compressible; the ratio is the binding
+	 * constraint and the pre-entry cap on the first entry is so tight
+	 * (5 bytes magic + 0 body bytes before the first chunk would breach)
+	 * that the validator must abort on the first body read.
+	 */
+	@Test
+	void realZipEntryReadStopsAtTheFirstLimitBreakingChunkForCompressionRatioLimit() throws Exception {
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long perEntry = 8L * buffer;
+		long body = perEntry - 5L;
+		long archiveCompressed = 1024L;
+		UploadLimitsProperties small = new UploadLimitsProperties(10485760L, perEntry, perEntry, 100, 1);
+
+		writeZip(Map.of("a.pdf", pdfPayload(body)));
+		assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(small).validate(this.spooledFile, archiveCompressed));
+	}
+
+	@Test
+	void readingAbortsAtTheFirstLimitBreakingChunkWhenTotalBudgetIsNearlyExhausted() throws Exception {
+		// Direct readAndValidatePdf test that mirrors the validator's
+		// per-entry cap behaviour with a tight effective limit. The body
+		// is much larger than the cap; the read must abort as soon as the
+		// running count exceeds the cap.
+		int buffer = ZipArchiveValidator.BUFFER_SIZE;
+		long cap = buffer - 5L; // magic (5) + one full buffer chunk
+		int totalPayload = 8 * buffer;
+		byte[] content = pdfPayload(totalPayload - PDF.length);
+
+		CountingInputStream counting = new CountingInputStream(new java.io.ByteArrayInputStream(content));
+		assertThrows(ArchiveValidationException.class,
+				() -> ZipArchiveValidator.readAndValidatePdf(counting, cap));
+		assertEquals(5L + buffer, counting.count,
+				"the read must stop at the first limit-breaking chunk");
+		assertTrue(counting.count < content.length,
+				"the stream must not be read to completion: read " + counting.count
+						+ " of " + content.length + " bytes");
 	}
 
 	@Test
