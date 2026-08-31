@@ -70,6 +70,9 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:?RABBITMQ_USERNAME is required}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Default: true. The verify-container-stack script disables the
+      # consumer for its first phase and re-enables it for the second.
+      INGESTION_CONSUMER_ENABLED: ${INGESTION_CONSUMER_ENABLED:-true}
     volumes:
       - sqlite-data:/data/sqlite
     restart: unless-stopped

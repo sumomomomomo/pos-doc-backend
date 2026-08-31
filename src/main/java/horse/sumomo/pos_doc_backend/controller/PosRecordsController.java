@@ -19,7 +19,9 @@ import com.yourcompany.pos.api.model.PosRecordSearchRequest;
 import com.yourcompany.pos.api.model.UploadAccepted;
 
 import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
+import horse.sumomo.pos_doc_backend.ingestion.application.PosDocumentListService;
 import horse.sumomo.pos_doc_backend.ingestion.application.UploadResult;
+import horse.sumomo.pos_doc_backend.ingestion.mapping.PosDocumentApiMapper;
 import horse.sumomo.pos_doc_backend.service.DummyPosRecordService;
 
 /**
@@ -41,6 +43,7 @@ public class PosRecordsController implements PosRecordsApi {
 	private static final Logger log = LoggerFactory.getLogger(PosRecordsController.class);
 
 	private final PosArchiveIntakeService intakeService;
+	private final PosDocumentListService documentListService;
 	private final DummyPosRecordService posRecordService;
 
 	/**
@@ -50,9 +53,11 @@ public class PosRecordsController implements PosRecordsApi {
 	private final String contextPath;
 
 	public PosRecordsController(PosArchiveIntakeService intakeService,
+			PosDocumentListService documentListService,
 			DummyPosRecordService posRecordService,
 			@org.springframework.beans.factory.annotation.Value("${server.servlet.context-path:/api/v1}") String contextPath) {
 		this.intakeService = intakeService;
+		this.documentListService = documentListService;
 		this.posRecordService = posRecordService;
 		this.contextPath = contextPath;
 	}
@@ -91,7 +96,9 @@ public class PosRecordsController implements PosRecordsApi {
 
 	@Override
 	public ResponseEntity<List<PosDocument>> listPosDocuments(UUID posRecordId) {
-		return ResponseEntity.ok(List.of(posRecordService.document(posRecordId)));
+		List<PosDocument> docs = this.documentListService.listDocuments(posRecordId).stream()
+				.map(PosDocumentApiMapper::toDto).toList();
+		return ResponseEntity.ok(docs);
 	}
 
 }

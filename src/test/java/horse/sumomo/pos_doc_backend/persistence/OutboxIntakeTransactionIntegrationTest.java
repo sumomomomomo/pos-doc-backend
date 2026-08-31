@@ -41,8 +41,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Uses a real temporary database and the real repositories. The outbox
  * relay is disabled so no broker is contacted.
  */
-@SpringBootTest(properties = { "app.messaging.outbox.enabled=false" })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+@SpringBootTest(properties = {
+ 	"app.messaging.outbox.enabled=false",
+ 	"app.ingestion.consumer.enabled=false"
+})
 class OutboxIntakeTransactionIntegrationTest {
 
 	private static final String SHA = "0000000000000000000000000000000000000000000000000000000000000000";

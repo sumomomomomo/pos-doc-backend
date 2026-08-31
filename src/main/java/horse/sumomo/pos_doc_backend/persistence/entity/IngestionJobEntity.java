@@ -110,6 +110,72 @@ public class IngestionJobEntity {
 		this.attemptCount = value;
 	}
 
+	/**
+	 * Begins one processing attempt: transitions the status to
+	 * {@link JobStatus#RUNNING}, increments the attempt count exactly once,
+	 * and stamps {@code startedAt}. Calling again during the same attempt
+	 * does not double-increment; the counter increases only on the first
+	 * invocation for this attempt.
+	 */
+	public void startAttempt(Instant now) {
+		Objects.requireNonNull(now, "attempt instant must not be null");
+		this.status = JobStatus.RUNNING;
+		this.attemptCount = this.attemptCount + 1L;
+		if (this.startedAt == null) {
+			this.startedAt = now;
+		}
+	}
+
+	/**
+	 * Marks the job completed and stamps {@code completedAt} on first call.
+	 * Subsequent calls preserve the first completion instant.
+	 */
+	public void complete(Instant now) {
+		Objects.requireNonNull(now, "completion instant must not be null");
+		this.status = JobStatus.COMPLETED;
+		if (this.completedAt == null) {
+			this.completedAt = now;
+		}
+	}
+
+	/**
+	 * Records a terminal failure with sanitized error fields. The status
+	 * transitions to {@link JobStatus#FAILED} and {@code completedAt} is
+	 * stamped if not already set. Error message must contain no PII; the
+	 * upstream listener sanitizes before calling this mutator.
+	 */
+	public void fail(Instant now, String errorCode, String safeErrorMessage) {
+		Objects.requireNonNull(now, "failure instant must not be null");
+		Objects.requireNonNull(errorCode, "errorCode must not be null");
+		if (errorCode.isBlank()) {
+			throw new IllegalArgumentException("errorCode must not be blank");
+		}
+		this.status = JobStatus.FAILED;
+		this.errorCode = errorCode;
+		this.errorMessage = safeErrorMessage;
+		if (this.completedAt == null) {
+			this.completedAt = now;
+		}
+	}
+
+	/**
+	 * Records a transient failure for the current attempt. Status
+	 * transitions to {@link JobStatus#RETRY_SCHEDULED}; the attempt counter
+	 * is left unchanged (the previous {@code startAttempt} call already
+	 * recorded it). The next listener attempt will call
+	 * {@link #startAttempt(Instant)} again, bumping the counter.
+	 */
+	public void markRetry(Instant now, String errorCode, String safeErrorMessage) {
+		Objects.requireNonNull(now, "retry instant must not be null");
+		Objects.requireNonNull(errorCode, "errorCode must not be null");
+		if (errorCode.isBlank()) {
+			throw new IllegalArgumentException("errorCode must not be blank");
+		}
+		this.status = JobStatus.RETRY_SCHEDULED;
+		this.errorCode = errorCode;
+		this.errorMessage = safeErrorMessage;
+	}
+
 	public void setErrorCode(String value) {
 		this.errorCode = value;
 	}

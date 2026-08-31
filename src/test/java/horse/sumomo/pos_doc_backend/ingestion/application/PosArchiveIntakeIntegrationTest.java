@@ -52,7 +52,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * database. The outbox relay is disabled: no RabbitMQ is started here.
  * MinIO is never mocked on the happy path.
  */
-@SpringBootTest(properties = { "app.messaging.outbox.enabled=false" })
+@SpringBootTest(properties = {
+ 	"app.messaging.outbox.enabled=false",
+ 	"app.ingestion.consumer.enabled=false"
+})
 @AutoConfigureMockMvc
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PosArchiveIntakeIntegrationTest {

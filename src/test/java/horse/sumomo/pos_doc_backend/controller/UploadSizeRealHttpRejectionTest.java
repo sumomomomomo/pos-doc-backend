@@ -48,7 +48,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @SpringBootTest(
 		webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
 		properties = {
-				"app.messaging.outbox.enabled=false"
+				"app.messaging.outbox.enabled=false",
+				"app.ingestion.consumer.enabled=false"
 		})
 @DirtiesContext
 class UploadSizeRealHttpRejectionTest {

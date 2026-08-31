@@ -63,6 +63,16 @@ app:
     max-entry-bytes: 52428800
     max-file-entries: 100
     max-compression-ratio: 100
+  ingestion:
+    consumer:
+      enabled: ${INGESTION_CONSUMER_ENABLED:true}
+      concurrency: 1
+      prefetch: 1
+      max-attempts: 3
+      initial-backoff-ms: 1000
+      backoff-multiplier: 2.0
+      max-backoff-ms: 5000
+      max-message-bytes: 4096
   messaging:
     outbox:
       enabled: ${OUTBOX_RELAY_ENABLED:true}

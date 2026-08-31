@@ -4,6 +4,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
+import horse.sumomo.pos_doc_backend.ingestion.api.ConsumerProperties;
 import horse.sumomo.pos_doc_backend.ingestion.api.OutboxRelayProperties;
 import horse.sumomo.pos_doc_backend.ingestion.api.RabbitTopologyProperties;
 import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
@@ -21,7 +22,7 @@ import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
 @Configuration
 @EnableScheduling
 @EnableConfigurationProperties({UploadLimitsProperties.class, RabbitTopologyProperties.class,
-		OutboxRelayProperties.class})
+		OutboxRelayProperties.class, ConsumerProperties.class})
 public class OutboxSchedulingConfiguration {
 
 }

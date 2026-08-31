@@ -158,6 +158,20 @@ public class PosRecordEntity {
 		this.status = value;
 	}
 
+	public void setUpdatedAt(Instant value) {
+		this.updatedAt = value;
+	}
+
+	/**
+	 * Marks the record as actively being processed. Stamps {@code updatedAt}
+	 * so observers see the transition. Does not touch soft-delete state.
+	 */
+	public void markProcessing(Instant now) {
+		Objects.requireNonNull(now, "processing instant must not be null");
+		this.status = PosRecordStatus.PROCESSING;
+		this.updatedAt = now;
+	}
+
 	/**
 	 * Soft-deletes this record. Requires a non-null deletion instant, is
 	 * idempotent, and sets {@code deletedAt} and {@code updatedAt} on the

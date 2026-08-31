@@ -15,6 +15,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import horse.sumomo.pos_doc_backend.ingestion.application.IntakeException;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
+import horse.sumomo.pos_doc_backend.ingestion.application.PosDocumentListService;
 import horse.sumomo.pos_doc_backend.ingestion.application.UploadResult;
 import horse.sumomo.pos_doc_backend.ingestion.archive.ArchiveValidationException;
 import horse.sumomo.pos_doc_backend.persistence.entity.IngestionJobEntity;
@@ -62,6 +63,9 @@ class ApiSkeletonTest {
 
     @MockitoBean
     private PosArchiveIntakeService intakeService;
+
+    @MockitoBean
+    private PosDocumentListService documentListService;
 
     @MockitoBean
     private IngestionJobRepository ingestionJobRepository;
@@ -136,15 +140,14 @@ class ApiSkeletonTest {
     }
 
     @Test
-    void listPosDocumentsReturnsSingleDummyDocument() throws Exception {
+    void listPosDocumentsReturnsEmptyArrayWhenNoDocumentsExist() throws Exception {
         String pathId = "11111111-1111-1111-1111-111111111111";
+        when(this.documentListService.listDocuments(org.mockito.ArgumentMatchers.any(UUID.class)))
+                .thenReturn(java.util.List.of());
 
         mockMvc.perform(get("/pos-records/{id}/documents", pathId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$[0].posRecordId").value(pathId))
-                .andExpect(jsonPath("$[0].storageObject.originalFilename").value("dummy-document.pdf"))
-                .andExpect(jsonPath("$[0].processingStatus").value("COMPLETED"));
+                .andExpect(jsonPath("$.length()").value(0));
     }
 
     @Test

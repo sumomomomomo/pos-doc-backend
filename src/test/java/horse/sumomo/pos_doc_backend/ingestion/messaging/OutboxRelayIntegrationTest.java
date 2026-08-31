@@ -62,8 +62,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * listener is registered.
  */
 @SpringBootTest(properties = {
-		"app.messaging.outbox.enabled=true",
-		"app.messaging.outbox.fixed-delay-ms=3600000"
+ 	"app.messaging.outbox.enabled=true",
+ 	"app.messaging.outbox.fixed-delay-ms=3600000",
+ 	"app.ingestion.consumer.enabled=false"
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

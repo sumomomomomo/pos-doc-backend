@@ -58,12 +58,16 @@ RABBITMQ_PASSWORD="task45-test-rabbit-secret-change-me"
 # both this (POSIX) shell and native Docker resolve it identically. An MSYS
 # /tmp/... path would be translated differently by the Windows docker client.
 ENV_FILE="$(mktemp "pos-doc-task2-test-env.XXXXXX")"
+# Phase 1 (Tasks 4-5): the consumer is disabled so the queued message
+# survives a RabbitMQ restart. Phase 2 (Task 6) re-enables it after the
+# durable-message check passes.
 cat > "${ENV_FILE}" <<EOF
 MINIO_ROOT_USER=${MINIO_ROOT_USER}
 MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
 MINIO_BUCKET=${MINIO_BUCKET}
 RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
 RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+INGESTION_CONSUMER_ENABLED=false
 EOF
 
 # Repository root. The script operates from here so that relative paths work
@@ -412,6 +416,192 @@ case "${JOB_RESPONSE}" in
     *"QUEUED"*) echo "job: still QUEUED after backend restart" ;;
     *) echo "ERROR: job no longer QUEUED after backend restart: ${JOB_RESPONSE}" >&2; exit 1 ;;
 esac
+
+# --- Task 6 phase 2: re-enable the consumer and verify end-to-end ------------
+#
+# Phase 1 (Tasks 4-5) left one durable message on pos.ingestion.jobs with the
+# consumer disabled. Phase 2 rewrites the env file with INGESTION_CONSUMER_ENABLED=true,
+# restarts the backend so the listener container spins up, and asserts the
+# consumer drains the queue, persists two documents, and leaves the storage
+# in a known shape.
+
+echo "== re-enable ingestion consumer =="
+cat > "${ENV_FILE}" <<EOF
+MINIO_ROOT_USER=${MINIO_ROOT_USER}
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+MINIO_BUCKET=${MINIO_BUCKET}
+RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
+RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+INGESTION_CONSUMER_ENABLED=true
+EOF
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" up --detach --wait backend >/dev/null
+i=0
+STATUS="starting"
+while [ "${i}" -lt 60 ]; do
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" ps -q backend)" 2>/dev/null || echo starting)"
+    if [ "${STATUS}" = "healthy" ]; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+if [ "${STATUS}" != "healthy" ]; then
+    echo "ERROR: backend did not become healthy with the consumer enabled." >&2
+    exit 1
+fi
+echo "backend: healthy with consumer enabled"
+
+echo "== job reaches COMPLETED with attempt_count=1 =="
+i=0
+JOB_RESPONSE=""
+while [ "${i}" -lt 60 ]; do
+    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:8080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
+    case "${JOB_RESPONSE}" in
+        *"\"status\":\"COMPLETED\""*'"attemptCount":1'*) break ;;
+    esac
+    i=$((i + 1))
+    sleep 1
+done
+case "${JOB_RESPONSE}" in
+    *"\"status\":\"COMPLETED\""*'"attemptCount":1'*)
+        echo "job: COMPLETED with attemptCount=1" ;;
+    *)
+        echo "ERROR: job did not reach COMPLETED/attemptCount=1: ${JOB_RESPONSE}" >&2
+        exit 1 ;;
+esac
+# Job must not carry an error code or error message.
+case "${JOB_RESPONSE}" in
+    *"errorCode"*|*"errorMessage"*)
+        echo "ERROR: completed job carries error fields: ${JOB_RESPONSE}" >&2
+        exit 1 ;;
+esac
+
+echo "== pos_document: exactly two ordered UNKNOWN/PENDING rows =="
+DOCS_RESPONSE="$(curl --fail --silent --show-error \
+    http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
+COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"id":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
+if [ "${COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 documents, got ${COUNT}: ${DOCS_RESPONSE}" >&2
+    exit 1
+fi
+case "${DOCS_RESPONSE}" in
+    *'"processingStatus":"PENDING"'*'"processingStatus":"PENDING"'*)
+        echo "documents: two rows, both PENDING" ;;
+    *)
+        echo "ERROR: documents not in PENDING state: ${DOCS_RESPONSE}" >&2
+        exit 1 ;;
+esac
+
+echo "== pos_record remains PROCESSING =="
+RECORD_RESPONSE="$(curl --fail --silent --show-error \
+    http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID})"
+case "${RECORD_RESPONSE}" in
+    *'"status":"PROCESSING"'*) echo "pos_record: PROCESSING" ;;
+    *) echo "ERROR: pos_record status not PROCESSING: ${RECORD_RESPONSE}" >&2; exit 1 ;;
+esac
+
+echo "== main queue and DLQ are empty =="
+for Q in pos.ingestion.jobs pos.ingestion.jobs.dlq; do
+    READY="$(curl --fail --silent --show-error \
+        --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
+        http://127.0.0.1:15672/api/queues/%2F/${Q} \
+        | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p')"
+    if [ "${READY}" != "0" ]; then
+        echo "ERROR: ${Q} has ${READY} ready messages, expected 0." >&2
+        exit 1
+    fi
+done
+echo "queues: empty"
+
+echo "== source archive and two UUID-keyed PDFs are in MinIO =="
+KEYS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
+    -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+    minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null")"
+SOURCE_COUNT="$(printf '%s' "${KEYS}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
+PDF_COUNT="$(printf '%s' "${KEYS}" | grep -cE "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
+if [ "${SOURCE_COUNT}" != "1" ]; then
+    echo "ERROR: expected 1 source archive under archives/${POS_RECORD_ID}/, got ${SOURCE_COUNT}." >&2
+    echo "Listing was: ${KEYS}" >&2
+    exit 1
+fi
+if [ "${PDF_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 UUID-keyed PDFs under documents/${POS_RECORD_ID}/, got ${PDF_COUNT}." >&2
+    echo "Listing was: ${KEYS}" >&2
+    exit 1
+fi
+echo "minio: source archive and 2 UUID-keyed PDFs present"
+
+echo "== PDFs are byte-for-byte equal to fixture entries =="
+EXTRACT_DIR="$(mktemp -d "pos-doc-task6-pdfs.XXXXXX")"
+PDF_KEYS="$(printf '%s' "${KEYS}" | grep -E "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
+for KEY in ${PDF_KEYS}; do
+    SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
+    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
+        -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+        minio-init "${MINIO_ALIAS_SETUP}; mc cat local/${MINIO_BUCKET}/${KEY}" > "${EXTRACT_DIR}/${SAFE_KEY}"
+done
+# Compare each extracted PDF against the corresponding fixture entry. The
+# script invokes `unzip -p` (POSIX) so the script needs neither `unzip` on
+# the host (only zip + sha256sum + sh) nor a temp directory for the fixture.
+EXTRACTED_KEYS="$(printf '%s' "${KEYS}" | grep -E "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" | sort)"
+MATCH=0
+for KEY in ${EXTRACTED_KEYS}; do
+    SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
+    ACTUAL_HASH="$(sha256sum "${EXTRACT_DIR}/${SAFE_KEY}" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+    for ENTRY in documents/first.pdf documents/second.pdf; do
+        EXPECTED_HASH="$(unzip -p "${FIXTURE}" "${ENTRY}" 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+        if [ "${ACTUAL_HASH}" = "${EXPECTED_HASH}" ]; then
+            MATCH=$((MATCH + 1))
+            break
+        fi
+    done
+done
+if [ "${MATCH}" != "2" ]; then
+    echo "ERROR: extracted PDFs did not match fixture entries (matched ${MATCH}/2)." >&2
+    exit 1
+fi
+echo "pdfs: both extracted PDFs byte-for-byte equal fixture entries"
+rm -rf "${EXTRACT_DIR}"
+
+echo "== duplicate message is a no-op (idempotency) =="
+# Re-publish the same message; the consumer must treat it as IDEMPOTENT_NOOP.
+# The JOB_ID already exists; we craft a payload that references it.
+DUP_PAYLOAD="$(printf '{"eventId":"%s","jobId":"%s","posRecordId":"%s","schemaVersion":1,"occurredAt":"2026-01-02T03:04:05Z"}' \
+    "$(printf '%s' "${JOB_RESPONSE}" | sed -n 's/.*"eventId":"\([0-9a-f-]\{36\}\)".*/\1/p')" \
+    "${JOB_ID}" "${POS_RECORD_ID}")"
+# Publish via the RabbitMQ HTTP management API using POST /api/exchanges.
+curl --fail --silent --show-error --request POST \
+    --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
+    -H 'content-type: application/json' \
+    -d "{\"properties\":{\"content_type\":\"application/json\",\"content_encoding\":\"UTF-8\",\"delivery_mode\":2,\"message_id\":\"$(printf '%s' "${JOB_RESPONSE}" | sed -n 's/.*"eventId":"\([0-9a-f-]\{36\}\)".*/\1/p')\",\"correlation_id\":\"${JOB_ID}\",\"type\":\"INGESTION_REQUESTED\"},\"routing_key\":\"pos.ingestion.requested\",\"payload\":$(printf '%s' "${DUP_PAYLOAD}" | sed 's/"/\\"/g'),\"payload_encoding\":\"string\"}" \
+    "http://127.0.0.1:15672/api/exchanges/%2F/pos.ingestion/exchange/publish" >/dev/null
+# Bounded wait for the consumer to ACK the duplicate.
+i=0
+READY="1"
+while [ "${i}" -lt 30 ]; do
+    READY="$(curl --fail --silent --show-error \
+        --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
+        http://127.0.0.1:15672/api/queues/%2F/pos.ingestion.jobs \
+        | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p')"
+    if [ "${READY}" = "0" ]; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+if [ "${READY}" != "0" ]; then
+    echo "ERROR: duplicate message was not consumed (ready=${READY})." >&2
+    exit 1
+fi
+# Still exactly two documents.
+DOCS_AFTER="$(curl --fail --silent --show-error \
+    http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
+COUNT_AFTER="$(printf '%s' "${DOCS_AFTER}" | grep -o '"id":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
+if [ "${COUNT_AFTER}" != "2" ]; then
+    echo "ERROR: duplicate delivery created extra documents: ${DOCS_AFTER}" >&2
+    exit 1
+fi
+echo "duplicate: ACK'd as no-op; document count unchanged"
 
 echo ""
 echo "verify-container-stack: ALL CHECKS PASSED"
