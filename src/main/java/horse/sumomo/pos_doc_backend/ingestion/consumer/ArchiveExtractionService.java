@@ -35,8 +35,14 @@ import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
  *   <li>Derive a deterministic document UUID and storage-object UUID.</li>
  *   <li>Build a unique PII-free object key
  *       {@code documents/{posRecordId}/{documentId}.pdf}.</li>
+ *   <li>Probe the object's pre-existence (HEAD against the bucket).
+ *       Pre-existing objects must not be deleted during compensation;
+ *       they are only reused when every immutable field matches the
+ *       proposed extraction.</li>
  *   <li>Stream the entry to a unique temp PDF, computing SHA-256, and
- *       enforcing the configured per-entry limit on every read.</li>
+ *       enforcing the per-entry limit, the cumulative expanded-byte
+ *       limit, and the effective compression-ratio limit using bytes
+ *       actually read.</li>
  *   <li>Validate the {@code %PDF-} magic and exact byte count.</li>
  *   <li>Upload the temp PDF with {@code application/pdf} and the known
  *       size.</li>
@@ -73,11 +79,12 @@ public class ArchiveExtractionService {
 	 *
 	 * @param sourceZipPath       the verified source archive temp file
 	 * @param sourceByteCount     the actual compressed byte count of the
-	 *                            source archive (used for ZIP validation)
+	 *                            source archive (used for ZIP validation
+	 *                            and effective compression-ratio check)
 	 * @param posRecordId         the POS record UUID
 	 * @return the list of {@link ExtractedPdf} in central-directory order
-	 * @throws ConsumerException on size, hash, ZIP, magic, or storage
-	 *             failures
+	 * @throws ConsumerException on size, hash, ZIP, magic, cumulative,
+	 *             ratio, or storage failures
 	 */
 	public List<ExtractedPdf> extractAndStore(Path sourceZipPath, long sourceByteCount, UUID posRecordId) {
 		Objects.requireNonNull(sourceZipPath, "sourceZipPath must not be null");
@@ -92,26 +99,43 @@ public class ArchiveExtractionService {
 		}
 
 		List<ExtractedPdf> out = new ArrayList<>(validated.pdfCount());
+		List<ExtractedPdf> uploaded = new ArrayList<>(validated.pdfCount());
 		try (ZipFile zipFile = openZip(sourceZipPath)) {
 			var entries = zipFile.entries();
 			int sequence = 0;
+			long cumulativeExpanded = 0L;
 			while (entries.hasMoreElements()) {
 				ZipEntry entry = entries.nextElement();
 				if (entry.isDirectory()) {
 					continue;
 				}
-				ExtractedPdf extracted = extractOne(zipFile, entry, sequence, posRecordId);
+				ExtractedPdf extracted = extractOne(zipFile, entry, sequence, posRecordId, sourceByteCount,
+						cumulativeExpanded);
 				out.add(extracted);
+				uploaded.add(extracted);
+				cumulativeExpanded += extracted.byteSize();
 				sequence++;
 			}
 		}
 		catch (ArchiveValidationException e) {
 			// Re-raise validation failures from extraction with the same
 			// stable category.
+			compensate(uploaded);
 			throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID, e);
 		}
+		catch (ConsumerException e) {
+			// Partial failure during extraction: only compensate the
+			// objects the current attempt actually uploaded.
+			compensate(uploaded);
+			throw e;
+		}
 		catch (IOException e) {
+			compensate(uploaded);
 			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
+		}
+		catch (RuntimeException e) {
+			compensate(uploaded);
+			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
 		}
 
 		log.info("Archive extraction persisted PDFs (category=extraction-success); posRecordId={}, pdfCount={}",
@@ -120,16 +144,25 @@ public class ArchiveExtractionService {
 	}
 
 	/**
-	 * Deletes only the MinIO keys created during the current attempt. Used
-	 * by the listener when a later step fails, to keep partial uploads out
-	 * of the bucket. Logs only the UUIDs that identify the objects; raw
-	 * object keys are UUID-only and may be logged for orphan recovery.
+	 * Deletes only the MinIO keys newly created during the current
+	 * attempt. Pre-existing deterministic objects are left intact so a
+	 * crash-recovery re-attempt that finds them in the bucket never
+	 * destroys user data. Best-effort: a single delete failure is
+	 * logged and the remaining deletes are still attempted. Used by
+	 * the listener when a later step fails.
 	 */
 	public void compensate(List<ExtractedPdf> created) {
 		if (created == null || created.isEmpty()) {
 			return;
 		}
 		for (ExtractedPdf pdf : created) {
+			if (pdf.wasPreExisting()) {
+				// Never delete a pre-existing deterministic object; a
+				// concurrent attempt may still be reading it.
+				log.debug("Compensation skipped for pre-existing object (category=compensation-skip); "
+						+ "documentId={}, objectKey={}", pdf.documentId(), pdf.objectKey());
+				continue;
+			}
 			try {
 				this.storage.delete(pdf.objectKey());
 			}
@@ -140,11 +173,24 @@ public class ArchiveExtractionService {
 		}
 	}
 
-	private ExtractedPdf extractOne(ZipFile zipFile, ZipEntry entry, int sequence, UUID posRecordId) {
+	private ExtractedPdf extractOne(ZipFile zipFile, ZipEntry entry, int sequence, UUID posRecordId,
+			long sourceByteCount, long cumulativeExpandedBefore) {
 		UUID documentId = DocumentIdentityDeriver.deriveDocumentId(posRecordId, sequence);
 		UUID storageObjectId = DocumentIdentityDeriver.deriveStorageObjectId(documentId);
 		String objectKey = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, documentId);
 		String filenameSegment = lastSegment(entry.getName());
+
+		// Probe pre-existence. A pre-existing object with the
+		// deterministic key is a previous successful upload; we will
+		// keep it untouched (compensation skips it) and let the
+		// persistence step reconcile against it.
+		boolean wasPreExisting;
+		try {
+			wasPreExisting = this.storage.exists(objectKey);
+		}
+		catch (RuntimeException e) {
+			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
+		}
 
 		Path tempPdf;
 		try {
@@ -157,7 +203,7 @@ public class ArchiveExtractionService {
 		long byteCount;
 		String sha256;
 		try (InputStream in = zipFile.getInputStream(entry)) {
-			byteCount = streamPdfWithLimits(in, tempPdf);
+			byteCount = streamPdfWithLimits(in, tempPdf, cumulativeExpandedBefore, sourceByteCount);
 		}
 		catch (ConsumerException e) {
 			deleteQuietly(tempPdf);
@@ -185,25 +231,31 @@ public class ArchiveExtractionService {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE);
 		}
 
-		try (InputStream in = Files.newInputStream(tempPdf)) {
-			this.storage.put(objectKey, in, byteCount, PDF_CONTENT_TYPE);
-		}
-		catch (IOException e) {
-			deleteQuietly(tempPdf);
-			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
-		}
-		catch (RuntimeException e) {
-			deleteQuietly(tempPdf);
-			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
+		// Only upload when the deterministic key did not already exist;
+		// the persistence step will reconcile against the existing
+		// object's bytes via the size/hash immutable fields.
+		if (!wasPreExisting) {
+			try (InputStream in = Files.newInputStream(tempPdf)) {
+				this.storage.put(objectKey, in, byteCount, PDF_CONTENT_TYPE);
+			}
+			catch (IOException e) {
+				deleteQuietly(tempPdf);
+				throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
+			}
+			catch (RuntimeException e) {
+				deleteQuietly(tempPdf);
+				throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
+			}
 		}
 		deleteQuietly(tempPdf);
 
 		Instant now = Instant.now();
 		return new ExtractedPdf(documentId, storageObjectId, objectKey, filenameSegment, byteCount, sha256,
-				sequence, now);
+				sequence, wasPreExisting, now);
 	}
 
-	private long streamPdfWithLimits(InputStream in, Path tempPdf) {
+	private long streamPdfWithLimits(InputStream in, Path tempPdf, long cumulativeExpandedBefore,
+			long sourceByteCount) {
 		MessageDigest digest;
 		try {
 			digest = MessageDigest.getInstance("SHA-256");
@@ -231,6 +283,11 @@ public class ArchiveExtractionService {
 			if (bytesRead > this.limits.maxEntryBytes()) {
 				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
 			}
+			// Cumulative expanded budget: a single entry's worth of
+			// bytes must fit; the running total must also fit.
+			if (cumulativeExpandedBefore + bytesRead > this.limits.maxUncompressedBytes()) {
+				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
+			}
 			out.write(magic, 0, magicRead);
 			digest.update(magic, 0, magicRead);
 
@@ -241,12 +298,26 @@ public class ArchiveExtractionService {
 				if (bytesRead > this.limits.maxEntryBytes()) {
 					throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
 				}
+				if (cumulativeExpandedBefore + bytesRead > this.limits.maxUncompressedBytes()) {
+					throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
+				}
 				out.write(buffer, 0, read);
 				digest.update(buffer, 0, read);
 			}
 		}
 		catch (IOException e) {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
+		}
+
+		// Effective compression ratio: bytes-actually-read vs compressed
+		// source. We check after the entry is fully read so the bound
+		// reflects the on-the-wire ratio, not a streaming estimate.
+		if (sourceByteCount > 0L) {
+			long totalExpanded = cumulativeExpandedBefore + bytesRead;
+			long observedRatio = (totalExpanded + sourceByteCount - 1L) / sourceByteCount; // ceil division
+			if (observedRatio > this.limits.maxCompressionRatio()) {
+				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
+			}
 		}
 		return bytesRead;
 	}
@@ -305,9 +376,9 @@ public class ArchiveExtractionService {
 		return sb.toString().toLowerCase(Locale.ROOT);
 	}
 
-	private static ZipFile openZip(Path zipPath) {
+	private static ZipFile openZip(Path sourceZipPath) {
 		try {
-			return new ZipFile(zipPath.toFile());
+			return new ZipFile(sourceZipPath.toFile());
 		}
 		catch (IOException e) {
 			throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID, e);
@@ -324,20 +395,12 @@ public class ArchiveExtractionService {
 	}
 
 	/**
-	 * One extracted PDF, ready to be persisted.
-	 *
-	 * @param documentId      deterministic document UUID
-	 * @param storageObjectId deterministic storage-object UUID
-	 * @param objectKey       the PII-free MinIO object key
-	 * @param filenameSegment the final path segment of the source entry
-	 *                        (kept as metadata only)
-	 * @param byteSize        exact byte count of the PDF
-	 * @param sha256          lowercase hex SHA-256
-	 * @param sequence        zero-based central-directory sequence
-	 * @param createdAt       the upload instant
+	 * Per-PDF extraction result. {@code wasPreExisting} records whether
+	 * the deterministic key was already present in MinIO when this
+	 * attempt started; it is used by compensation to leave any
+	 * pre-existing object untouched.
 	 */
 	public record ExtractedPdf(UUID documentId, UUID storageObjectId, String objectKey, String filenameSegment,
-			long byteSize, String sha256, int sequence, Instant createdAt) {
+			long byteSize, String sha256, int sequence, boolean wasPreExisting, Instant uploadedAt) {
 	}
-
 }

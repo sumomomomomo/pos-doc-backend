@@ -16,7 +16,6 @@ import horse.sumomo.pos_doc_backend.ingestion.consumer.ArchiveExtractionService.
 import horse.sumomo.pos_doc_backend.persistence.entity.IngestionJobEntity;
 import horse.sumomo.pos_doc_backend.persistence.entity.PosRecordEntity;
 import horse.sumomo.pos_doc_backend.persistence.entity.StorageObjectEntity;
-import horse.sumomo.pos_doc_backend.persistence.model.PosRecordStatus;
 import horse.sumomo.pos_doc_backend.persistence.repository.IngestionJobRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.PosRecordRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.StorageObjectRepository;
@@ -61,32 +60,23 @@ public class IngestionConsumerService {
 	/**
 	 * Performs one consumer attempt for the given message. Throws
 	 * {@link ConsumerException} on categorized failure; the listener's
-	 * retry/recoverer decides whether to retry or DLQ.
+	 * retry/recoverer decides whether to retry or DLQ. This method does
+	 * not record the failure state itself — that responsibility belongs
+	 * to the AMQP recoverer so a database failure on the main flow
+	 * cannot prevent the terminal FAILED transition from being
+	 * recorded.
 	 */
 	public void consume(IngestionMessageIdentifiers ids) {
 		Objects.requireNonNull(ids, "ids must not be null");
 
 		Claim claim = self.claim(ids);
-		try {
-			switch (claim.action) {
-				case START -> runExtraction(claim);
-				case IDEMPOTENT_NOOP -> log.debug("Idempotent no-op; job already completed (category=idempotent-noop); jobId={}",
-						ids.jobId());
-				case TERMINAL_NOOP -> log.debug("Terminal FAILED; ACK (category=terminal-noop); jobId={}",
-						ids.jobId());
-				case STATE_CONFLICT -> throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT);
-			}
-		}
-		catch (ConsumerException e) {
-			// Mark the job RETRY_SCHEDULED with sanitized fields when the
-			// listener retries, and FAILED when the retry budget is
-			// exhausted. The recoverer calls {@link #markTerminalFailure}.
-			if (e.getCode() != null && !e.getCode().retryable()) {
-				self.markTerminalFailure(ids, e);
-				throw e;
-			}
-			self.markTransientFailure(ids, e);
-			throw e;
+		switch (claim.action) {
+			case START -> runExtraction(claim);
+			case IDEMPOTENT_NOOP -> log.debug("Idempotent no-op; job already completed (category=idempotent-noop); jobId={}",
+					ids.jobId());
+			case TERMINAL_NOOP -> log.debug("Terminal FAILED; ACK (category=terminal-noop); jobId={}",
+					ids.jobId());
+			case STATE_CONFLICT -> throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT);
 		}
 	}
 
@@ -187,29 +177,6 @@ public class IngestionConsumerService {
 
 	/** Snapshot of {@link StorageObjectEntity} fields read inside a transaction. */
 	record SourceArchiveSpec(String objectKey, long byteSize, String sha256) {
-	}
-
-	@Transactional
-	protected void markTransientFailure(IngestionMessageIdentifiers ids, ConsumerException e) {
-		IngestionJobEntity job = this.jobRepository.findById(ids.jobId())
-				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
-		job.markRetry(Instant.now(), e.getCode().code(), e.getCode().detail());
-		this.jobRepository.saveAndFlush(job);
-	}
-
-	@Transactional
-	protected void markTerminalFailure(IngestionMessageIdentifiers ids, ConsumerException e) {
-		IngestionJobEntity job = this.jobRepository.findById(ids.jobId())
-				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
-		job.fail(Instant.now(), e.getCode().code(), e.getCode().detail());
-		PosRecordEntity record = job.getPosRecord();
-		if (record != null && record.getDeletedAt() == null && record.getStatus() == PosRecordStatus.PROCESSING) {
-			record.setStatus(horse.sumomo.pos_doc_backend.persistence.model.PosRecordStatus.FAILED);
-			record.setUpdatedAt(Instant.now());
-			this.recordRepository.saveAndFlush(record);
-		}
-		this.jobRepository.saveAndFlush(job);
-		log.warn("Job permanently failed (category={}); jobId={}", e.getCode().code(), ids.jobId());
 	}
 
 	/**

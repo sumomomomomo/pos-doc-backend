@@ -22,10 +22,12 @@ import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessag
  *       which claims the job, downloads the source ZIP, runs the existing
  *       ZIP validator and the streaming PDF extractor, uploads each PDF,
  *       and persists the document rows atomically.</li>
- *   <li>Bounded retry: retry transient failures up to
+ *   <li>Bounded retry: retryable failures are retried up to
  *       {@code max-attempts} times with capped exponential backoff within
  *       the same delivery; nonretryable failures and exhausted retries
- *       reject the message so it lands on the DLQ.</li>
+ *       delegate to {@link IngestionTerminalRecoverer}, which records the
+ *       FAILED state in a fresh short transaction and rejects the message
+ *       so it lands on the DLQ.</li>
  * </ol>
  *
  * <p>Listener concurrency is pinned to 1 by
@@ -40,17 +42,24 @@ public class IngestionListener {
 
 	private final IngestionMessageValidator validator;
 	private final IngestionConsumerService consumerService;
+	private final IngestionTerminalRecoverer terminalRecoverer;
 	private final ConsumerProperties consumerProperties;
 
 	public IngestionListener(IngestionMessageValidator validator, IngestionConsumerService consumerService,
-			ConsumerProperties consumerProperties) {
+			IngestionTerminalRecoverer terminalRecoverer, ConsumerProperties consumerProperties) {
 		this.validator = validator;
 		this.consumerService = consumerService;
+		this.terminalRecoverer = terminalRecoverer;
 		this.consumerProperties = consumerProperties;
 	}
 
 	@RabbitListener(queues = "#{@ingestionQueueNameProvider.name}", containerFactory = "ingestionListenerContainerFactory")
 	public void onMessage(Message message) {
+		// 1. Validate the envelope and parse the body. Malformed
+		// messages are nonretryable and never touch the consumer
+		// service: the terminal recoverer records the FAILED state
+		// from the AMQP headers if possible, otherwise the recoverer
+		// just rejects to DLQ.
 		IngestionRequestedMessage parsed;
 		try {
 			parsed = this.validator.validate(message);
@@ -58,9 +67,11 @@ public class IngestionListener {
 		catch (ConsumerException e) {
 			log.warn("Malformed message reached the consumer (category=message-invalid); detail={}; rejecting to DLQ",
 					e.getMessage());
+			this.terminalRecoverer.recover(message, e);
 			throw e;
 		}
 
+		// 2. Hand off to the consumer.
 		IngestionConsumerService.IngestionMessageIdentifiers ids =
 				new IngestionConsumerService.IngestionMessageIdentifiers(parsed.jobId(), parsed.posRecordId());
 		int maxAttempts = this.consumerProperties.getMaxAttempts();
@@ -74,10 +85,12 @@ public class IngestionListener {
 				last = e;
 				if (!e.getCode().retryable()) {
 					log.warn("Nonretryable failure (category={}); rejecting to DLQ", e.getCode().code());
+					this.terminalRecoverer.recover(message, e);
 					throw e;
 				}
 				if (attempt >= maxAttempts) {
 					log.warn("Retry budget exhausted (category={}); rejecting to DLQ", e.getCode().code());
+					this.terminalRecoverer.recover(message, e);
 					throw e;
 				}
 				long backoff = computeBackoffMs(attempt);
@@ -88,25 +101,24 @@ public class IngestionListener {
 				}
 				catch (InterruptedException ie) {
 					Thread.currentThread().interrupt();
+					this.terminalRecoverer.recover(message, e);
 					throw e;
 				}
 			}
 		}
 		if (last != null) {
+			this.terminalRecoverer.recover(message, last);
 			throw last;
 		}
 	}
 
 	private long computeBackoffMs(int attempt) {
-		double multiplier = this.consumerProperties.getBackoffMultiplier();
 		long initial = this.consumerProperties.getInitialBackoffMs();
 		long max = this.consumerProperties.getMaxBackoffMs();
+		double multiplier = this.consumerProperties.getBackoffMultiplier();
 		double computed = initial * Math.pow(multiplier, attempt - 1);
 		long bounded = (long) Math.min(computed, max);
-		// Add a tiny jitter (up to 25% of initial) to avoid synchronized retries
-		// in the unlikely event of multiple listeners running simultaneously.
 		long jitter = ThreadLocalRandom.current().nextLong(initial / 4 + 1);
 		return Math.min(bounded + jitter, max);
 	}
-
 }

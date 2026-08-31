@@ -92,7 +92,13 @@ class ArchiveExtractionServiceIntegrationTest {
 
 	@Test
 	void extractsMultiplePdfsInOrderWithDeterministicIds() throws Exception {
-		byte[] zipBytes = zipBytes(Map.of("docs/first.pdf", PDF_A, "docs/second.pdf", PDF_B));
+		// Use a LinkedHashMap so the entry order is deterministic and
+		// matches the assertion expectations on every JVM. Map.of(...)
+		// does not specify iteration order across JVM versions.
+		Map<String, byte[]> ordered = new java.util.LinkedHashMap<>();
+		ordered.put("docs/first.pdf", PDF_A);
+		ordered.put("docs/second.pdf", PDF_B);
+		byte[] zipBytes = zipBytes(ordered);
 		Path zip = Files.createTempFile("extract-test-", ".zip");
 		Files.write(zip, zipBytes);
 

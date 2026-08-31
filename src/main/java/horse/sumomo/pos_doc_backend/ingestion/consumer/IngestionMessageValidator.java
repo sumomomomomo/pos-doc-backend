@@ -1,9 +1,7 @@
 package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
-import java.io.IOException;
 import java.time.Instant;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -15,7 +13,12 @@ import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.stereotype.Component;
 
+import horse.sumomo.pos_doc_backend.ingestion.api.ConsumerProperties;
 import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessage;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonParser;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Validates a raw AMQP {@link Message} and parses the
@@ -26,6 +29,14 @@ import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessag
  * {@link ConsumerException.Code#MESSAGE_INVALID}; the listener treats this
  * as a nonretryable failure so the message reaches the DLQ rather than
  * re-entering the queue.
+ *
+ * <p>JSON parsing is delegated to the configured Jackson 3 mapper with
+ * {@link JsonParser.Feature#STRICT_DUPLICATE_DETECTION} so a body that
+ * carries the same field name twice is rejected up-front rather than
+ * being silently overwritten. Exactly the five contract fields
+ * ({@code eventId, jobId, posRecordId, schemaVersion, occurredAt}) are
+ * accepted; any other field, including a duplicate, is a contract
+ * violation.
  */
 @Component
 public class IngestionMessageValidator {
@@ -38,9 +49,11 @@ public class IngestionMessageValidator {
 	private static final String EXPECTED_CONTENT_ENCODING = "UTF-8";
 
 	private final int maxMessageBytes;
+	private final JsonMapper jsonMapper;
 
-	public IngestionMessageValidator(horse.sumomo.pos_doc_backend.ingestion.api.ConsumerProperties properties) {
+	public IngestionMessageValidator(ConsumerProperties properties, JsonMapper jsonMapper) {
 		this.maxMessageBytes = properties.getMaxMessageBytes();
+		this.jsonMapper = Objects.requireNonNull(jsonMapper, "jsonMapper must not be null");
 	}
 
 	/**
@@ -66,9 +79,8 @@ public class IngestionMessageValidator {
 		if (encoding != null && !EXPECTED_CONTENT_ENCODING.equalsIgnoreCase(encoding)) {
 			throw invalid("unsupported content encoding");
 		}
-		MessageDeliveryMode outgoing = props.getDeliveryMode();
-		MessageDeliveryMode incoming = props.getReceivedDeliveryMode();
-		if (outgoing != MessageDeliveryMode.PERSISTENT && incoming != MessageDeliveryMode.PERSISTENT) {
+		if (props.getDeliveryMode() != MessageDeliveryMode.PERSISTENT
+				&& props.getReceivedDeliveryMode() != MessageDeliveryMode.PERSISTENT) {
 			throw invalid("delivery mode must be persistent");
 		}
 		String type = props.getType();
@@ -84,25 +96,19 @@ public class IngestionMessageValidator {
 			throw invalid("body exceeds the configured maximum size");
 		}
 
-		Map<String, Object> raw;
-		try {
-			raw = JsonObjectParser.parse(body);
-		}
-		catch (IOException e) {
-			throw invalid("body is not valid JSON");
-		}
-
+		Map<String, String> raw = parseBodyAsFlatObject(body);
 		if (raw == null || raw.isEmpty()) {
 			throw invalid("body must contain the required fields");
 		}
 
-		Set<String> unexpected = new LinkedHashSet<>(raw.keySet());
-		unexpected.removeAll(ALLOWED_PROPERTIES);
-		if (!unexpected.isEmpty()) {
-			throw invalid("body contains unexpected fields");
+		// Exactly the contract fields, in any order. Any other key is
+		// rejected. STRICT_DUPLICATE_DETECTION on the underlying
+		// mapper already prevents duplicate keys at parse time.
+		if (raw.size() != ALLOWED_PROPERTIES.size()) {
+			throw invalid("body must contain exactly the five contract fields");
 		}
 		for (String required : ALLOWED_PROPERTIES) {
-			if (!raw.containsKey(required) || raw.get(required) == null) {
+			if (!raw.containsKey(required)) {
 				throw invalid("body is missing required field " + required);
 			}
 		}
@@ -113,14 +119,14 @@ public class IngestionMessageValidator {
 		int schemaVersion;
 		Instant occurredAt;
 		try {
-			eventId = asUuid(raw.get("eventId"));
-			jobId = asUuid(raw.get("jobId"));
-			posRecordId = asUuid(raw.get("posRecordId"));
-			schemaVersion = asInt(raw.get("schemaVersion"));
-			occurredAt = asInstant(raw.get("occurredAt"));
+			eventId = UUID.fromString(raw.get("eventId"));
+			jobId = UUID.fromString(raw.get("jobId"));
+			posRecordId = UUID.fromString(raw.get("posRecordId"));
+			schemaVersion = Integer.parseInt(raw.get("schemaVersion"));
+			occurredAt = Instant.parse(raw.get("occurredAt"));
 		}
-		catch (IllegalArgumentException e) {
-			throw invalid("body field has an invalid type");
+		catch (RuntimeException e) {
+			throw invalid("body field has an invalid type or format");
 		}
 
 		if (schemaVersion != IngestionRequestedMessage.SCHEMA_VERSION) {
@@ -144,208 +150,60 @@ public class IngestionMessageValidator {
 		}
 	}
 
+	/**
+	 * Parses the body as a flat JSON object whose values are all
+	 * strings. Duplicate keys raise {@link ConsumerException} with
+	 * {@code MESSAGE_INVALID} so a hostile producer cannot smuggle two
+	 * {@code jobId} fields and have the second silently win.
+	 *
+	 * <p>The configured mapper must have
+	 * {@link JsonParser.Feature#STRICT_DUPLICATE_DETECTION} enabled; the
+	 * explicit {@code LinkedHashMap.put(...)} duplicate check is a
+	 * defense-in-depth measure in case the feature is ever disabled
+	 * by a future configuration change.
+	 */
+	private Map<String, String> parseBodyAsFlatObject(byte[] body) {
+		JsonNode root;
+		try {
+			root = this.jsonMapper.readTree(body);
+		}
+		catch (JacksonException e) {
+			throw invalid("body is not valid JSON");
+		}
+		if (root == null || !root.isObject()) {
+			throw invalid("body must be a JSON object");
+		}
+		LinkedHashMap<String, String> out = new LinkedHashMap<>();
+		for (Map.Entry<String, JsonNode> entry : root.properties()) {
+			String name = entry.getKey();
+			JsonNode value = entry.getValue();
+			if (value == null || value.isContainer()) {
+				throw invalid("body field " + name + " must be a scalar");
+			}
+			String stringValue;
+			if (value.isNull()) {
+				throw invalid("body field " + name + " must not be null");
+			}
+			else if (value.isString()) {
+				stringValue = value.asString();
+			}
+			else if (value.isBoolean() || value.isNumber()) {
+				// Numbers and booleans come through as their textual
+				// canonical form (e.g. "42", "true") which is what the
+				// downstream parsers expect.
+				stringValue = value.asString();
+			}
+			else {
+				throw invalid("body field " + name + " has an unsupported JSON type");
+			}
+			if (out.put(name, stringValue) != null) {
+				throw invalid("body contains duplicate field " + name);
+			}
+		}
+		return out;
+	}
+
 	private static ConsumerException invalid(String detail) {
 		return new ConsumerException(ConsumerException.Code.MESSAGE_INVALID, detail);
 	}
-
-	private static UUID asUuid(Object value) {
-		if (!(value instanceof String s)) {
-			throw new IllegalArgumentException("expected UUID string");
-		}
-		try {
-			return UUID.fromString(s);
-		}
-		catch (IllegalArgumentException e) {
-			throw new IllegalArgumentException("invalid UUID: " + s);
-		}
-	}
-
-	private static int asInt(Object value) {
-		if (value instanceof Number n) {
-			return n.intValue();
-		}
-		if (value instanceof String s) {
-			try {
-				return Integer.parseInt(s);
-			}
-			catch (NumberFormatException e) {
-				throw new IllegalArgumentException("invalid int: " + s);
-			}
-		}
-		throw new IllegalArgumentException("expected integer");
-	}
-
-	private static Instant asInstant(Object value) {
-		if (!(value instanceof String s)) {
-			throw new IllegalArgumentException("expected ISO-8601 instant string");
-		}
-		try {
-			return Instant.parse(s);
-		}
-		catch (RuntimeException e) {
-			throw new IllegalArgumentException("invalid instant: " + s);
-		}
-	}
-
-	/**
-	 * Tiny JSON object parser that supports only the message-body shape:
-	 * flat object with string, number, boolean, and null values. Sufficient
-	 * for the bounded message body; bringing in Jackson here would create a
-	 * dependency cycle with the application-context-managed mapper. Public
-	 * for unit testing.
-	 */
-	static final class JsonObjectParser {
-
-		private final String src;
-		private int pos;
-
-		private JsonObjectParser(String src) {
-			this.src = src;
-		}
-
-		static Map<String, Object> parse(byte[] body) throws IOException {
-			String s = new String(body, java.nio.charset.StandardCharsets.UTF_8).trim();
-			JsonObjectParser p = new JsonObjectParser(s);
-			Map<String, Object> out = p.parseObject();
-			p.skipWhitespace();
-			if (p.pos != p.src.length()) {
-				throw new IOException("trailing content after JSON object");
-			}
-			return out;
-		}
-
-		private Map<String, Object> parseObject() throws IOException {
-			Map<String, Object> out = new LinkedHashMap<>();
-			skipWhitespace();
-			if (pos >= src.length() || src.charAt(pos) != '{') {
-				throw new IOException("expected '{' at index " + pos);
-			}
-			pos++;
-			skipWhitespace();
-			if (pos < src.length() && src.charAt(pos) == '}') {
-				pos++;
-				return out;
-			}
-			while (true) {
-				skipWhitespace();
-				if (pos >= src.length() || src.charAt(pos) != '"') {
-					throw new IOException("expected string key at index " + pos);
-				}
-				String key = readString();
-				skipWhitespace();
-				if (pos >= src.length() || src.charAt(pos) != ':') {
-					throw new IOException("expected ':' at index " + pos);
-				}
-				pos++;
-				skipWhitespace();
-				Object value = readValue();
-				out.put(key, value);
-				skipWhitespace();
-				if (pos < src.length() && src.charAt(pos) == ',') {
-					pos++;
-					continue;
-				}
-				if (pos < src.length() && src.charAt(pos) == '}') {
-					pos++;
-					return out;
-				}
-				throw new IOException("expected ',' or '}' at index " + pos);
-			}
-		}
-
-		private String readString() throws IOException {
-			if (pos >= src.length() || src.charAt(pos) != '"') {
-				throw new IOException("expected '\"' at index " + pos);
-			}
-			pos++;
-			StringBuilder sb = new StringBuilder();
-			while (pos < src.length()) {
-				char c = src.charAt(pos);
-				if (c == '"') {
-					pos++;
-					return sb.toString();
-				}
-				if (c == '\\') {
-					if (pos + 1 >= src.length()) {
-						throw new IOException("dangling escape");
-					}
-					char esc = src.charAt(pos + 1);
-					switch (esc) {
-						case '"' -> sb.append('"');
-						case '\\' -> sb.append('\\');
-						case '/' -> sb.append('/');
-						case 'b' -> sb.append('\b');
-						case 'f' -> sb.append('\f');
-						case 'n' -> sb.append('\n');
-						case 'r' -> sb.append('\r');
-						case 't' -> sb.append('\t');
-						default -> throw new IOException("unsupported escape: \\" + esc);
-					}
-					pos += 2;
-					continue;
-				}
-				sb.append(c);
-				pos++;
-			}
-			throw new IOException("unterminated string");
-		}
-
-		private Object readValue() throws IOException {
-			if (pos >= src.length()) {
-				throw new IOException("unexpected end of input");
-			}
-			char c = src.charAt(pos);
-			if (c == '"') {
-				return readString();
-			}
-			if (c == 't' && src.startsWith("true", pos)) {
-				pos += 4;
-				return Boolean.TRUE;
-			}
-			if (c == 'f' && src.startsWith("false", pos)) {
-				pos += 5;
-				return Boolean.FALSE;
-			}
-			if (c == 'n' && src.startsWith("null", pos)) {
-				pos += 4;
-				return null;
-			}
-			if (c == '-' || (c >= '0' && c <= '9')) {
-				return readNumber();
-			}
-			throw new IOException("unsupported value at index " + pos);
-		}
-
-		private Number readNumber() throws IOException {
-			int start = pos;
-			if (src.charAt(pos) == '-') {
-				pos++;
-			}
-			while (pos < src.length() && Character.isDigit(src.charAt(pos))) {
-				pos++;
-			}
-			boolean isFloat = false;
-			if (pos < src.length() && src.charAt(pos) == '.') {
-				isFloat = true;
-				pos++;
-				while (pos < src.length() && Character.isDigit(src.charAt(pos))) {
-					pos++;
-				}
-			}
-			String num = src.substring(start, pos);
-			try {
-				return isFloat ? (Number) Double.parseDouble(num) : Long.parseLong(num);
-			}
-			catch (NumberFormatException e) {
-				throw new IOException("invalid number: " + num);
-			}
-		}
-
-		private void skipWhitespace() {
-			while (pos < src.length() && Character.isWhitespace(src.charAt(pos))) {
-				pos++;
-			}
-		}
-	}
-
 }

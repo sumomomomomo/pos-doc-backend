@@ -1,8 +1,8 @@
 package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
-import org.springframework.amqp.rabbit.retry.RejectAndDontRequeueRecoverer;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
+import org.springframework.amqp.rabbit.retry.RejectAndDontRequeueRecoverer;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -12,19 +12,26 @@ import horse.sumomo.pos_doc_backend.ingestion.api.ConsumerProperties;
 import horse.sumomo.pos_doc_backend.ingestion.api.RabbitTopologyProperties;
 
 /**
- * AMQP listener configuration: container factory with one consumer thread
- * and prefetch one, no manual immediate requeue. The listener itself
- * implements the bounded retry policy with a Thread.sleep back-off
- * between attempts.
+ * AMQP listener configuration.
+ *
+ * <p>Listener-container factory: one consumer thread, prefetch one,
+ * {@code defaultRequeueRejected=false} so a rejected message is
+ * dropped to the DLQ. The bounded retry policy itself is implemented
+ * inside {@link IngestionListener} so the listener can invoke the
+ * terminal recoverer directly when retries are exhausted.
  */
 @Configuration
 public class ConsumerConfiguration {
 
 	/**
-	 * Listener container factory used by {@link IngestionListener}. Tuned
-	 * for the single-instance deployment: one consumer thread, prefetch
-	 * one, and {@code defaultRequeueRejected=false} so a rejected message
-	 * is dropped to the DLQ rather than infinitely requeued.
+	 * Listener container factory used by {@link IngestionListener}. The
+	 * listener concurrency is pinned to one thread; the prefetch is
+	 * pinned to one. {@code defaultRequeueRejected=false} so a rejected
+	 * message is sent to the DLQ rather than infinitely requeued. The
+	 * retry interceptor is intentionally not installed here: the
+	 * listener performs its own bounded retry so it can route the
+	 * terminal transition (mark the job FAILED, mark the POS record
+	 * FAILED, then reject) through a single audited code path.
 	 */
 	@Bean
 	@ConditionalOnProperty(prefix = "app.ingestion.consumer", name = "enabled", havingValue = "true")
@@ -42,11 +49,9 @@ public class ConsumerConfiguration {
 	}
 
 	/**
-	 * Default recoverer: the original AMQP exception is logged with a
-	 * stable category only, and the message is rejected without requeue
-	 * so it lands on the DLQ. Retained for any framework-level use; the
-	 * listener currently implements its own bounded retry, so this bean
-	 * is unused at runtime but kept as a documented fallback.
+	 * Default Spring AMQP recoverer: reject without requeue so the
+	 * message lands on the DLQ. Kept as a documented fallback for
+	 * cases that fall outside the listener's own retry loop.
 	 */
 	@Bean
 	public MessageRecoverer ingestionRejectRecoverer() {
@@ -79,5 +84,4 @@ public class ConsumerConfiguration {
 			return this.name;
 		}
 	}
-
 }

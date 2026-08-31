@@ -18,6 +18,7 @@ import horse.sumomo.pos_doc_backend.persistence.entity.PosRecordEntity;
 import horse.sumomo.pos_doc_backend.persistence.entity.StorageObjectEntity;
 import horse.sumomo.pos_doc_backend.persistence.model.DocumentProcessingStatus;
 import horse.sumomo.pos_doc_backend.persistence.model.DocumentType;
+import horse.sumomo.pos_doc_backend.persistence.model.JobStatus;
 import horse.sumomo.pos_doc_backend.persistence.repository.IngestionJobRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.PosDocumentRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.PosRecordRepository;
@@ -32,10 +33,15 @@ import horse.sumomo.pos_doc_backend.persistence.repository.StorageObjectReposito
  * and updates the job to {@code COMPLETED}. The POS record remains
  * {@code PROCESSING} because OCR is a later task.
  *
- * <p>Idempotency: when a redelivered message arrives for a job that already
- * has matching {@code pos_document} rows, the rows are reused; any mismatch
- * on the immutable fields (sequence, storage object key, size, hash) is a
- * permanent {@link ConsumerException.Code#EXTRACTION_STATE_CONFLICT}.
+ * <p>Idempotency: when a redelivered message arrives, the existing rows
+ * are compared against the proposed extraction across every immutable
+ * field — document id, storage object id, sequence, object key, original
+ * filename, content type, byte size, SHA-256, document type, and
+ * processing status. Any mismatch is a permanent
+ * {@link ConsumerException.Code#EXTRACTION_STATE_CONFLICT} so the message
+ * is sent to the DLQ. If all fields match and the job is in
+ * {@code QUEUED}, {@code RETRY_SCHEDULED}, or {@code RUNNING}, the same
+ * transaction completes the job.
  */
 @Service
 public class ExtractionPersistenceService {
@@ -76,12 +82,13 @@ public class ExtractionPersistenceService {
 		}
 
 		// Idempotency: if the job is already COMPLETED and the existing
-		// documents match the proposed extraction, the call is a no-op
-		// (still considered success). Mismatch is a permanent conflict.
+		// documents match the proposed extraction across every immutable
+		// field, the call is a no-op (still success). Mismatch is a
+		// permanent conflict.
 		List<PosDocumentEntity> existing = this.posDocumentRepository
 				.findByPosRecordIdOrderBySequenceNumberAsc(posRecordId);
 		if (!existing.isEmpty()) {
-			reconcileExisting(existing, pdfs);
+			reconcileExisting(existing, pdfs, job, now);
 			return;
 		}
 
@@ -101,30 +108,53 @@ public class ExtractionPersistenceService {
 			this.posDocumentRepository.saveAndFlush(document);
 		}
 
-		job.complete(now);
-		this.ingestionJobRepository.saveAndFlush(job);
+		// Always complete the job in the same transaction so a redelivery
+		// that finds a RUNNING job (e.g. crash-recovery) is reconciled.
+		completeInTx(job, now);
 
 		log.info("Extraction persisted (category=persistence-success); posRecordId={}, jobId={}, pdfCount={}",
 				posRecordId, jobId, pdfs.size());
 	}
 
-	private void reconcileExisting(List<PosDocumentEntity> existing, List<ExtractedPdf> proposed) {
+	private void reconcileExisting(List<PosDocumentEntity> existing, List<ExtractedPdf> proposed,
+			IngestionJobEntity job, Instant now) {
 		if (existing.size() != proposed.size()) {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT);
 		}
 		for (int i = 0; i < existing.size(); i++) {
 			PosDocumentEntity doc = existing.get(i);
 			ExtractedPdf pdf = proposed.get(i);
-			if (doc.getSequenceNumber() != pdf.sequence()
-					|| !doc.getId().equals(pdf.documentId())
-					|| !doc.getStorageObject().getId().equals(pdf.storageObjectId())
-					|| !doc.getStorageObject().getObjectKey().equals(pdf.objectKey())
-					|| doc.getStorageObject().getByteSize() != pdf.byteSize()
-					|| !doc.getStorageObject().getSha256().equalsIgnoreCase(pdf.sha256())) {
+			StorageObjectEntity storage = doc.getStorageObject();
+			// Every immutable field must match. A mismatch on any of these
+			// would mean the same POS record is being asked to point at
+			// two different archives; that is a permanent conflict.
+			if (!doc.getId().equals(pdf.documentId())
+					|| doc.getSequenceNumber() != pdf.sequence()
+					|| doc.getDocumentType() != INITIAL_TYPE
+					|| doc.getProcessingStatus() != INITIAL_STATUS
+					|| !storage.getId().equals(pdf.storageObjectId())
+					|| !storage.getObjectKey().equals(pdf.objectKey())
+					|| !Objects.equals(storage.getOriginalFilename(), pdf.filenameSegment())
+					|| !PDF_CONTENT_TYPE.equals(storage.getContentType())
+					|| storage.getByteSize() != pdf.byteSize()
+					|| !storage.getSha256().equalsIgnoreCase(pdf.sha256())) {
 				throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT);
 			}
 		}
-		// Match: extraction is idempotent; nothing to write.
+		// Match. If the job is still in flight (RUNNING from a previous
+		// crash, or QUEUED/RETRY_SCHEDULED for a still-in-flight retry
+		// cycle), complete it in the same transaction. If the job is
+		// already COMPLETED, no-op.
+		if (job.getStatus() != JobStatus.COMPLETED) {
+			completeInTx(job, now);
+		}
+		log.debug("Reconciled existing extraction (category=persistence-idempotent); jobId={}, pdfCount={}",
+				job.getId(), existing.size());
+	}
+
+	private void completeInTx(IngestionJobEntity job, Instant now) {
+		job.complete(now);
+		this.ingestionJobRepository.saveAndFlush(job);
 	}
 
 	/**
