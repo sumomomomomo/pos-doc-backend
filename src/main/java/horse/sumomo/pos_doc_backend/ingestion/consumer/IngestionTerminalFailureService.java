@@ -28,6 +28,14 @@ import horse.sumomo.pos_doc_backend.persistence.repository.PosRecordRepository;
  * the consumer's main flow cannot prevent the terminal {@code FAILED}
  * state from being recorded, and so the listener can ack/reject the
  * message after the FAILED transition is durable.
+ *
+ * <p>The recoverer must never mutate a database row based on a
+ * message whose body it could not safely parse. The recoverer asks
+ * this service to verify that {@code jobId} is associated with the
+ * given {@code posRecordId} before any FAILED transition is
+ * persisted; the verify call is itself a read-only transaction, and
+ * the recoverer treats a {@code false} return as "do not mutate, just
+ * DLQ".
  */
 @Service
 public class IngestionTerminalFailureService {
@@ -43,6 +51,31 @@ public class IngestionTerminalFailureService {
 		this.self = self;
 		this.jobRepository = Objects.requireNonNull(jobRepository);
 		this.recordRepository = Objects.requireNonNull(recordRepository);
+	}
+
+	/**
+	 * Read-only verification that the given {@code jobId} exists and
+	 * is associated with the given {@code posRecordId}. Returns
+	 * {@code false} for any negative outcome: a missing job, a job
+	 * whose POS record is null, or a job whose POS record id does not
+	 * match. A {@code false} result means the caller must not mutate
+	 * any row — the message must still reach the DLQ, just without a
+	 * database side-effect.
+	 */
+	@Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
+	public boolean verifyRelationship(UUID jobId, UUID posRecordId) {
+		if (jobId == null || posRecordId == null) {
+			return false;
+		}
+		IngestionJobEntity job = this.jobRepository.findById(jobId).orElse(null);
+		if (job == null) {
+			return false;
+		}
+		PosRecordEntity record = job.getPosRecord();
+		if (record == null) {
+			return false;
+		}
+		return posRecordId.equals(record.getId());
 	}
 
 	/**

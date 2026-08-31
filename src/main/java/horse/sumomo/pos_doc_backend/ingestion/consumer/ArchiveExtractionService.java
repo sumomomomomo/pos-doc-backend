@@ -35,17 +35,20 @@ import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
  *   <li>Derive a deterministic document UUID and storage-object UUID.</li>
  *   <li>Build a unique PII-free object key
  *       {@code documents/{posRecordId}/{documentId}.pdf}.</li>
- *   <li>Probe the object's pre-existence (HEAD against the bucket).
- *       Pre-existing objects must not be deleted during compensation;
- *       they are only reused when every immutable field matches the
- *       proposed extraction.</li>
+ *   <li>Probe the object's pre-existence (HEAD against the bucket). The
+ *       pre-existence flag is recorded on the {@link ExtractedPdf} so
+ *       compensation can skip it; the extractor still <em>always</em>
+ *       uploads the freshly extracted bytes so the bucket reflects the
+ *       verified immutable source archive. The persistence step then
+ *       reconciles against the new bytes via the immutable storage /
+ *       document fields.</li>
  *   <li>Stream the entry to a unique temp PDF, computing SHA-256, and
  *       enforcing the per-entry limit, the cumulative expanded-byte
  *       limit, and the effective compression-ratio limit using bytes
  *       actually read.</li>
  *   <li>Validate the {@code %PDF-} magic and exact byte count.</li>
  *   <li>Upload the temp PDF with {@code application/pdf} and the known
- *       size.</li>
+ *       size, overwriting any object already at the deterministic key.</li>
  *   <li>Delete the temp PDF before processing the next entry.</li>
  * </ol>
  *
@@ -147,9 +150,11 @@ public class ArchiveExtractionService {
 	 * Deletes only the MinIO keys newly created during the current
 	 * attempt. Pre-existing deterministic objects are left intact so a
 	 * crash-recovery re-attempt that finds them in the bucket never
-	 * destroys user data. Best-effort: a single delete failure is
-	 * logged and the remaining deletes are still attempted. Used by
-	 * the listener when a later step fails.
+	 * destroys user data, and so that a successful retry that
+	 * legitimately overwrote the same key leaves the bucket in a
+	 * consistent state. Best-effort: a single delete failure is logged
+	 * and the remaining deletes are still attempted. Used by the
+	 * listener when a later step fails.
 	 */
 	public void compensate(List<ExtractedPdf> created) {
 		if (created == null || created.isEmpty()) {
@@ -157,8 +162,10 @@ public class ArchiveExtractionService {
 		}
 		for (ExtractedPdf pdf : created) {
 			if (pdf.wasPreExisting()) {
-				// Never delete a pre-existing deterministic object; a
-				// concurrent attempt may still be reading it.
+				// Never delete a pre-existing deterministic object: a
+				// concurrent attempt may still be reading it and the
+				// current attempt may have only refreshed the bytes,
+				// not created the key.
 				log.debug("Compensation skipped for pre-existing object (category=compensation-skip); "
 						+ "documentId={}, objectKey={}", pdf.documentId(), pdf.objectKey());
 				continue;
@@ -181,9 +188,11 @@ public class ArchiveExtractionService {
 		String filenameSegment = lastSegment(entry.getName());
 
 		// Probe pre-existence. A pre-existing object with the
-		// deterministic key is a previous successful upload; we will
-		// keep it untouched (compensation skips it) and let the
-		// persistence step reconcile against it.
+		// deterministic key is a previous successful upload. We still
+		// overwrite it with the freshly extracted bytes so the bucket
+		// always reflects the verified immutable source archive; the
+		// flag is retained on the ExtractedPdf so compensation can
+		// skip it on a later failure.
 		boolean wasPreExisting;
 		try {
 			wasPreExisting = this.storage.exists(objectKey);
@@ -231,21 +240,20 @@ public class ArchiveExtractionService {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE);
 		}
 
-		// Only upload when the deterministic key did not already exist;
-		// the persistence step will reconcile against the existing
-		// object's bytes via the size/hash immutable fields.
-		if (!wasPreExisting) {
-			try (InputStream in = Files.newInputStream(tempPdf)) {
-				this.storage.put(objectKey, in, byteCount, PDF_CONTENT_TYPE);
-			}
-			catch (IOException e) {
-				deleteQuietly(tempPdf);
-				throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
-			}
-			catch (RuntimeException e) {
-				deleteQuietly(tempPdf);
-				throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
-			}
+		// Always upload so the bucket reflects the verified immutable
+		// source archive. Pre-existence was already probed; the flag on
+		// ExtractedPdf tells compensation to skip deletion of a key
+		// that existed before this attempt.
+		try (InputStream in = Files.newInputStream(tempPdf)) {
+			this.storage.put(objectKey, in, byteCount, PDF_CONTENT_TYPE);
+		}
+		catch (IOException e) {
+			deleteQuietly(tempPdf);
+			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
+		}
+		catch (RuntimeException e) {
+			deleteQuietly(tempPdf);
+			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
 		}
 		deleteQuietly(tempPdf);
 
@@ -339,16 +347,16 @@ public class ArchiveExtractionService {
 
 	private static void verifyPdfMagic(Path file) {
 		try (InputStream in = Files.newInputStream(file)) {
-			byte[] magic = new byte[PDF_MAGIC_LEN];
+			byte[] head = new byte[PDF_MAGIC_LEN];
 			int read = 0;
 			while (read < PDF_MAGIC_LEN) {
-				int r = in.read(magic, read, PDF_MAGIC_LEN - read);
+				int r = in.read(head, read, PDF_MAGIC_LEN - read);
 				if (r == -1) {
 					throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
 				}
 				read += r;
 			}
-			if (magic[0] != '%' || magic[1] != 'P' || magic[2] != 'D' || magic[3] != 'F' || magic[4] != '-') {
+			if (head[0] != '%' || head[1] != 'P' || head[2] != 'D' || head[3] != 'F' || head[4] != '-') {
 				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
 			}
 		}
@@ -358,13 +366,9 @@ public class ArchiveExtractionService {
 	}
 
 	private static String lastSegment(String entryName) {
-		String normalized = entryName.replace('\\', '/');
-		int last = normalized.lastIndexOf('/');
-		String segment = last >= 0 ? normalized.substring(last + 1) : normalized;
-		if (segment.isBlank()) {
-			segment = "document.pdf";
-		}
-		return segment;
+		int idx = entryName.lastIndexOf('/');
+		String tail = idx < 0 ? entryName : entryName.substring(idx + 1);
+		return tail.toLowerCase(Locale.ROOT);
 	}
 
 	private static String hexLowercase(byte[] bytes) {
@@ -373,7 +377,7 @@ public class ArchiveExtractionService {
 			sb.append(Character.forDigit((b >> 4) & 0xF, 16));
 			sb.append(Character.forDigit(b & 0xF, 16));
 		}
-		return sb.toString().toLowerCase(Locale.ROOT);
+		return sb.toString();
 	}
 
 	private static ZipFile openZip(Path sourceZipPath) {
@@ -390,15 +394,18 @@ public class ArchiveExtractionService {
 			Files.deleteIfExists(path);
 		}
 		catch (IOException ignored) {
-			// best effort
+			// Best-effort cleanup; the next run will overwrite the
+			// temp file via TRUNCATE_EXISTING.
 		}
 	}
 
 	/**
 	 * Per-PDF extraction result. {@code wasPreExisting} records whether
 	 * the deterministic key was already present in MinIO when this
-	 * attempt started; it is used by compensation to leave any
-	 * pre-existing object untouched.
+	 * attempt began. The extractor still <em>always</em> uploads the
+	 * freshly extracted bytes, so the flag's only remaining purpose is
+	 * to drive compensation: only keys newly created by this attempt
+	 * may be deleted on a later failure.
 	 */
 	public record ExtractedPdf(UUID documentId, UUID storageObjectId, String objectKey, String filenameSegment,
 			long byteSize, String sha256, int sequence, boolean wasPreExisting, Instant uploadedAt) {

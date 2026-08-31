@@ -39,14 +39,17 @@ import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.ObjectStorageException;
 
 /**
- * Compensation tests for {@link ArchiveExtractionService}.
+ * Compensation and overwrite tests for {@link ArchiveExtractionService}.
  *
  * <p>Covers Task 6 acceptance criteria:
  * <ul>
- * <li>second-PDF upload failure: only objects newly created by the
- * current attempt are compensated,</li>
- * <li>pre-existing deterministic objects are never deleted by
- * compensation.</li>
+ *   <li>the extractor always overwrites any pre-existing deterministic
+ *       MinIO object with the freshly extracted PDF bytes from the
+ *       verified immutable source archive,</li>
+ *   <li>second-PDF upload failure: only objects newly created by the
+ *       current attempt are compensated,</li>
+ *   <li>pre-existing deterministic objects are never deleted by
+ *       compensation.</li>
  * </ul>
  *
  * <p>These are pure unit tests with mocked storage so they run without
@@ -155,37 +158,18 @@ class ArchiveExtractionServiceCompensationTest {
 		String firstKey = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, firstDocId);
 		String secondKey = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, secondDocId);
 
-		// Both keys "pre-exist" -> service will NOT call put() for either.
-		// Inject a failure on the existence probe for the second key
-		// to simulate a storage outage that hits the second entry.
-		when(this.storage.exists(firstKey)).thenReturn(true);
-		when(this.storage.exists(secondKey)).thenThrow(
-		 new ObjectStorageException("simulated storage outage on second probe"));
-
-		ConsumerException thrown = assertThrows(ConsumerException.class,
-				() -> this.service.extractAndStore(zip, Files.size(zip), posRecordId));
-		assertEquals(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, thrown.getCode());
-
-		// No put() because both keys were reported as pre-existing.
-		verify(this.storage, never()).put(eq(firstKey), any(InputStream.class), anyLong(), anyString());
-		verify(this.storage, never()).put(eq(secondKey), any(InputStream.class), anyLong(), anyString());
-
-		// Compensation must not delete the pre-existing keys.
-		verify(this.storage, never()).delete(anyString());
-
-		// Second scenario: neither key pre-exists, the first upload
-		// succeeds, the second upload fails. The service must compensate
-		// only the first (newly created) key.
-		Mockito.reset(this.storage);
+		// Neither key pre-exists, the first upload succeeds, the second
+		// upload fails. The service must compensate only the first
+		// (newly created) key.
 		when(this.storage.exists(firstKey)).thenReturn(false);
 		when(this.storage.exists(secondKey)).thenReturn(false);
 
 		doThrow(new ObjectStorageException("simulated failure on second upload"))
 				.when(this.storage).put(eq(secondKey), any(InputStream.class), anyLong(), anyString());
 
-		ConsumerException second = assertThrows(ConsumerException.class,
+		ConsumerException thrown = assertThrows(ConsumerException.class,
 				() -> this.service.extractAndStore(zip, Files.size(zip), posRecordId));
-		assertNotNull(second);
+		assertNotNull(thrown);
 
 		// First was uploaded, second failed.
 		verify(this.storage, times(1)).put(eq(firstKey), any(InputStream.class), anyLong(), anyString());
@@ -194,6 +178,63 @@ class ArchiveExtractionServiceCompensationTest {
 		// Compensation must delete only the first key (newly created).
 		verify(this.storage, times(1)).delete(firstKey);
 		verify(this.storage, never()).delete(secondKey);
+	}
+
+	@Test
+	void extractorOverwritesPreExistingKeyWithCorrectBytes() throws Exception {
+		// The extractor must always upload the freshly extracted bytes
+		// from the verified source archive, even when the deterministic
+		// key already exists. The storage.exists() probe must NOT be
+		// used as a "skip upload" guard; it is only a flag on the
+		// ExtractedPdf record so compensation skips the delete.
+		UUID posRecordId = UUID.randomUUID();
+		Map<String, byte[]> entries = new LinkedHashMap<>();
+		entries.put("only.pdf", PDF_A);
+		Path zip = writeZip(entries);
+
+		UUID docId = DocumentIdentityDeriver.deriveDocumentId(posRecordId, 0);
+		String key = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, docId);
+
+		// Pretend the bucket already has the deterministic key from a
+		// previous run, perhaps holding junk bytes.
+		when(this.storage.exists(key)).thenReturn(true);
+
+		List<ExtractedPdf> result = this.service.extractAndStore(zip, Files.size(zip), posRecordId);
+
+		assertEquals(1, result.size());
+		ExtractedPdf only = result.get(0);
+		assertEquals(key, only.objectKey());
+		assertTrue(only.wasPreExisting(),
+				"ExtractedPdf must remember the key pre-existed so compensation can skip it");
+		assertEquals(sha256Hex(PDF_A), only.sha256(),
+				"The reported sha256 must reflect the bytes the extractor just wrote");
+
+		// put() was invoked regardless of the pre-existence flag.
+		verify(this.storage, times(1)).put(eq(key), any(InputStream.class),
+				eq((long) PDF_A.length), eq("application/pdf"));
+	}
+
+	@Test
+	void extractorCompensationDoesNotDeletePreExistingKey() throws Exception {
+		// After a successful extraction where the key pre-existed,
+		// calling compensate() with the produced list must NOT delete
+		// the key: the key existed before this attempt began.
+		UUID posRecordId = UUID.randomUUID();
+		Map<String, byte[]> entries = new LinkedHashMap<>();
+		entries.put("only.pdf", PDF_A);
+		Path zip = writeZip(entries);
+
+		UUID docId = DocumentIdentityDeriver.deriveDocumentId(posRecordId, 0);
+		String key = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, docId);
+
+		when(this.storage.exists(key)).thenReturn(true);
+
+		List<ExtractedPdf> result = this.service.extractAndStore(zip, Files.size(zip), posRecordId);
+		assertEquals(1, result.size());
+
+		this.service.compensate(result);
+
+		verify(this.storage, never()).delete(anyString());
 	}
 
 	private static Path writeZip(Map<String, byte[]> entries) throws Exception {

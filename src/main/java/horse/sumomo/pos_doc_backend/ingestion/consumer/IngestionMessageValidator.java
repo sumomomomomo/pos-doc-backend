@@ -11,12 +11,13 @@ import java.util.UUID;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import horse.sumomo.pos_doc_backend.ingestion.api.ConsumerProperties;
 import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessage;
 import tools.jackson.core.JacksonException;
-import tools.jackson.core.JsonParser;
+import tools.jackson.core.StreamReadFeature;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -30,10 +31,12 @@ import tools.jackson.databind.json.JsonMapper;
  * as a nonretryable failure so the message reaches the DLQ rather than
  * re-entering the queue.
  *
- * <p>JSON parsing is delegated to the configured Jackson 3 mapper with
- * {@link JsonParser.Feature#STRICT_DUPLICATE_DETECTION} so a body that
- * carries the same field name twice is rejected up-front rather than
- * being silently overwritten. Exactly the five contract fields
+ * <p>JSON parsing is delegated to the dedicated ingestion-message
+ * Jackson mapper exposed by
+ * {@link IngestionMessageJsonMapperConfiguration}, which has
+ * {@link StreamReadFeature#STRICT_DUPLICATE_DETECTION} enabled so a body
+ * that carries the same field name twice is rejected up-front rather
+ * than being silently overwritten. Exactly the five contract fields
  * ({@code eventId, jobId, posRecordId, schemaVersion, occurredAt}) are
  * accepted; any other field, including a duplicate, is a contract
  * violation.
@@ -51,7 +54,8 @@ public class IngestionMessageValidator {
 	private final int maxMessageBytes;
 	private final JsonMapper jsonMapper;
 
-	public IngestionMessageValidator(ConsumerProperties properties, JsonMapper jsonMapper) {
+	public IngestionMessageValidator(ConsumerProperties properties,
+			@Qualifier(IngestionMessageJsonMapperConfiguration.INGESTION_MESSAGE_JSON_MAPPER) JsonMapper jsonMapper) {
 		this.maxMessageBytes = properties.getMaxMessageBytes();
 		this.jsonMapper = Objects.requireNonNull(jsonMapper, "jsonMapper must not be null");
 	}
@@ -157,7 +161,7 @@ public class IngestionMessageValidator {
 	 * {@code jobId} fields and have the second silently win.
 	 *
 	 * <p>The configured mapper must have
-	 * {@link JsonParser.Feature#STRICT_DUPLICATE_DETECTION} enabled; the
+	 * {@link StreamReadFeature#STRICT_DUPLICATE_DETECTION} enabled; the
 	 * explicit {@code LinkedHashMap.put(...)} duplicate check is a
 	 * defense-in-depth measure in case the feature is ever disabled
 	 * by a future configuration change.
