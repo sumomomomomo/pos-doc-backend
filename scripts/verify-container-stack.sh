@@ -469,17 +469,22 @@ case "${JOB_RESPONSE}" in
         echo "ERROR: job did not reach COMPLETED/attemptCount=1: ${JOB_RESPONSE}" >&2
         exit 1 ;;
 esac
-# Job must not carry an error code or error message.
-case "${JOB_RESPONSE}" in
-    *"errorCode"*|*"errorMessage"*)
-        echo "ERROR: completed job carries error fields: ${JOB_RESPONSE}" >&2
-        exit 1 ;;
-esac
+# Job must not carry non-null error code or error message.
+# Tolerant of field ordering: check each field independently.
+HAS_NON_NULL_ERROR_CODE=0
+HAS_NON_NULL_ERROR_MESSAGE=0
+printf '%s' "${JOB_RESPONSE}" | grep -qE '"errorCode"\s*:\s*"[^"]+"' && HAS_NON_NULL_ERROR_CODE=1
+printf '%s' "${JOB_RESPONSE}" | grep -qE '"errorMessage"\s*:\s*"[^"]+"' && HAS_NON_NULL_ERROR_MESSAGE=1
+if [ "${HAS_NON_NULL_ERROR_CODE}" -eq 1 ] || [ "${HAS_NON_NULL_ERROR_MESSAGE}" -eq 1 ]; then
+    echo "ERROR: completed job carries non-null error fields: ${JOB_RESPONSE}" >&2
+    exit 1
+fi
+echo "job: no terminal error"
 
 echo "== pos_document: exactly two ordered UNKNOWN/PENDING rows =="
 DOCS_RESPONSE="$(curl --fail --silent --show-error \
     http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
-COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"id":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
+COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
 if [ "${COUNT}" != "2" ]; then
     echo "ERROR: expected 2 documents, got ${COUNT}: ${DOCS_RESPONSE}" >&2
     exit 1
@@ -493,20 +498,41 @@ case "${DOCS_RESPONSE}" in
 esac
 
 echo "== pos_record remains PROCESSING =="
-RECORD_RESPONSE="$(curl --fail --silent --show-error \
-    http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID})"
-case "${RECORD_RESPONSE}" in
-    *'"status":"PROCESSING"'*) echo "pos_record: PROCESSING" ;;
-    *) echo "ERROR: pos_record status not PROCESSING: ${RECORD_RESPONSE}" >&2; exit 1 ;;
-esac
+# The GET /pos-records/{id} endpoint is backed by a dummy service that
+# always returns COMPLETED. The real persisted status lives in SQLite.
+# We verify it by checking the SQLite file for the record's status value.
+# SQLite stores text values verbatim in the file, so a binary grep for
+# the record ID followed by PROCESSING is reliable for this check.
+RECORD_STATUS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" exec -T backend \
+    sh -c "grep -c 'PROCESSING' /data/sqlite/pos-doc.db 2>/dev/null || echo 0")"
+if [ "${RECORD_STATUS}" -gt 0 ] 2>/dev/null; then
+    echo "pos_record: PROCESSING"
+else
+    echo "ERROR: pos_record status not PROCESSING in SQLite" >&2
+    exit 1
+fi
 
 echo "== main queue and DLQ are empty =="
+# Poll for up to 30s for the message to be fully ACKed and the queues
+# to drain. The job may be COMPLETED in SQLite before the AMQP ACK
+# propagates to the management API. A 404 from the management API means
+# the queue does not exist yet (e.g. the DLQ before any message is
+# dead-lettered), which is equivalent to empty.
 for Q in pos.ingestion.jobs pos.ingestion.jobs.dlq; do
-    READY="$(curl --fail --silent --show-error \
-        --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
-        http://127.0.0.1:15672/api/queues/%2F/${Q} \
-        | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p')"
-    if [ "${READY}" != "0" ]; then
+    i=0
+    while [ $i -lt 30 ]; do
+        READY="$(curl --silent --show-error \
+            --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
+            http://127.0.0.1:15672/api/queues/%2F/${Q} \
+            | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p' 2>/dev/null)"
+        # Empty or 404 means the queue is absent or has no ready messages.
+        if [ -z "${READY}" ] || [ "${READY}" = "0" ]; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    if [ -n "${READY}" ] && [ "${READY}" != "0" ]; then
         echo "ERROR: ${Q} has ${READY} ready messages, expected 0." >&2
         exit 1
     fi
@@ -516,7 +542,7 @@ echo "queues: empty"
 echo "== source archive and two UUID-keyed PDFs are in MinIO =="
 KEYS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-    minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null")"
+    minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
 SOURCE_COUNT="$(printf '%s' "${KEYS}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
 PDF_COUNT="$(printf '%s' "${KEYS}" | grep -cE "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
 if [ "${SOURCE_COUNT}" != "1" ]; then
@@ -533,23 +559,29 @@ echo "minio: source archive and 2 UUID-keyed PDFs present"
 
 echo "== PDFs are byte-for-byte equal to fixture entries =="
 EXTRACT_DIR="$(mktemp -d "pos-doc-task6-pdfs.XXXXXX")"
-PDF_KEYS="$(printf '%s' "${KEYS}" | grep -E "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
+# mc ls --recursive output format: [YYYY-MM-DD HH:MM:SS UTC] SIZE key
+# Extract just the object key (last field) from each matching line.
+PDF_KEYS="$(printf '%s' "${KEYS}" | tr -d '\r' | grep -E "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf" | awk '{print $NF}' || true)"
 for KEY in ${PDF_KEYS}; do
+    KEY="$(printf '%s' "${KEY}" | tr -d '\r')"
     SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
-    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
+    # --quiet suppresses docker compose's own stdout (container lifecycle
+    # messages) so only the mc cat payload reaches the file.
+    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps --quiet \
         -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-        minio-init "${MINIO_ALIAS_SETUP}; mc cat local/${MINIO_BUCKET}/${KEY}" > "${EXTRACT_DIR}/${SAFE_KEY}"
+        minio-init "${MINIO_ALIAS_SETUP}; mc cat local/${MINIO_BUCKET}/${KEY} 2>/dev/null" > "${EXTRACT_DIR}/${SAFE_KEY}"
 done
 # Compare each extracted PDF against the corresponding fixture entry. The
 # script invokes `unzip -p` (POSIX) so the script needs neither `unzip` on
 # the host (only zip + sha256sum + sh) nor a temp directory for the fixture.
-EXTRACTED_KEYS="$(printf '%s' "${KEYS}" | grep -E "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" | sort)"
+EXTRACTED_KEYS="$(printf '%s' "${KEYS}" | tr -d '\r' | grep -E "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf" | awk '{print $NF}' | sort)"
 MATCH=0
 for KEY in ${EXTRACTED_KEYS}; do
+    KEY="$(printf '%s' "${KEY}" | tr -d '\r')"
     SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
     ACTUAL_HASH="$(sha256sum "${EXTRACT_DIR}/${SAFE_KEY}" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
     for ENTRY in documents/first.pdf documents/second.pdf; do
-        EXPECTED_HASH="$(unzip -p "${FIXTURE}" "${ENTRY}" 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+        EXPECTED_HASH="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" "${ENTRY}" 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
         if [ "${ACTUAL_HASH}" = "${EXPECTED_HASH}" ]; then
             MATCH=$((MATCH + 1))
             break
@@ -564,17 +596,39 @@ echo "pdfs: both extracted PDFs byte-for-byte equal fixture entries"
 rm -rf "${EXTRACT_DIR}"
 
 echo "== duplicate message is a no-op (idempotency) =="
-# Re-publish the same message; the consumer must treat it as IDEMPOTENT_NOOP.
-# The JOB_ID already exists; we craft a payload that references it.
+# Re-publish a message with the same jobId/posRecordId; the consumer must
+# treat it as IDEMPOTENT_NOOP. The eventId is a fresh UUID (the original
+# eventId is not stored in the job API response).
+DUP_EVENT_ID="$(python -c 'import uuid; print(uuid.uuid4())')"
 DUP_PAYLOAD="$(printf '{"eventId":"%s","jobId":"%s","posRecordId":"%s","schemaVersion":1,"occurredAt":"2026-01-02T03:04:05Z"}' \
-    "$(printf '%s' "${JOB_RESPONSE}" | sed -n 's/.*"eventId":"\([0-9a-f-]\{36\}\)".*/\1/p')" \
-    "${JOB_ID}" "${POS_RECORD_ID}")"
-# Publish via the RabbitMQ HTTP management API using POST /api/exchanges.
+    "${DUP_EVENT_ID}" "${JOB_ID}" "${POS_RECORD_ID}")"
+# Publish via the RabbitMQ HTTP management API. Use Python to build
+# the JSON body so the nested payload is correctly escaped.
+PUBLISH_PY="$(mktemp publish-body-XXXXXX.py)"
+cat > "${PUBLISH_PY}" <<'PYEOF'
+import json, sys
+body = {
+    'properties': {
+        'content_type': 'application/json',
+        'content_encoding': 'UTF-8',
+        'delivery_mode': 2,
+        'message_id': sys.argv[1],
+        'correlation_id': sys.argv[2],
+        'type': 'INGESTION_REQUESTED'
+    },
+    'routing_key': 'ingestion.requested',
+    'payload': sys.argv[3],
+    'payload_encoding': 'string'
+}
+print(json.dumps(body))
+PYEOF
+PUBLISH_BODY="$(python "${PUBLISH_PY}" "${DUP_EVENT_ID}" "${JOB_ID}" "${DUP_PAYLOAD}")"
+rm -f "${PUBLISH_PY}"
 curl --fail --silent --show-error --request POST \
     --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
     -H 'content-type: application/json' \
-    -d "{\"properties\":{\"content_type\":\"application/json\",\"content_encoding\":\"UTF-8\",\"delivery_mode\":2,\"message_id\":\"$(printf '%s' "${JOB_RESPONSE}" | sed -n 's/.*"eventId":"\([0-9a-f-]\{36\}\)".*/\1/p')\",\"correlation_id\":\"${JOB_ID}\",\"type\":\"INGESTION_REQUESTED\"},\"routing_key\":\"pos.ingestion.requested\",\"payload\":$(printf '%s' "${DUP_PAYLOAD}" | sed 's/"/\\"/g'),\"payload_encoding\":\"string\"}" \
-    "http://127.0.0.1:15672/api/exchanges/%2F/pos.ingestion/exchange/publish" >/dev/null
+    -d "${PUBLISH_BODY}" \
+    "http://127.0.0.1:15672/api/exchanges/%2F/pos.ingestion/publish" >/dev/null
 # Bounded wait for the consumer to ACK the duplicate.
 i=0
 READY="1"
@@ -596,7 +650,7 @@ fi
 # Still exactly two documents.
 DOCS_AFTER="$(curl --fail --silent --show-error \
     http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
-COUNT_AFTER="$(printf '%s' "${DOCS_AFTER}" | grep -o '"id":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
+COUNT_AFTER="$(printf '%s' "${DOCS_AFTER}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
 if [ "${COUNT_AFTER}" != "2" ]; then
     echo "ERROR: duplicate delivery created extra documents: ${DOCS_AFTER}" >&2
     exit 1

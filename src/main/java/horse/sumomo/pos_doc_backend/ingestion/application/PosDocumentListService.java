@@ -41,7 +41,7 @@ public class PosDocumentListService {
 		if (!this.posRecordRepository.findByIdAndDeletedAtIsNull(posRecordId).isPresent()) {
 			throw new IntakeException(IntakeException.Code.INGESTION_JOB_NOT_FOUND);
 		}
-		return this.posDocumentRepository.findByPosRecordIdOrderBySequenceNumberAsc(posRecordId);
+		return this.posDocumentRepository.findWithAssociationsByPosRecordId(posRecordId);
 	}
 
 }

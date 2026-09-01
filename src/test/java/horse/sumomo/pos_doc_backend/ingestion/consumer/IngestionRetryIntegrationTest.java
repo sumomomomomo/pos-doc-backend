@@ -258,40 +258,84 @@ class IngestionRetryIntegrationTest {
 		// No transient failures for this scenario.
 		transientFailuresRemaining.set(0);
 
-		UUID fakeJobId = UUID.randomUUID();
-		UUID fakePosRecordId = UUID.randomUUID();
-		UUID fakeEventId = UUID.randomUUID();
+		// Create a real job/record so we can prove the malformed
+		// message does not mutate an existing row.
+		UUID posRecordId = UUID.randomUUID();
+		UUID jobId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
+		prepareJob(posRecordId, jobId, occurredAt);
 
-		// Send a malformed body: the validator rejects before any
-		// database lookup or storage call.
+		// Snapshot the job/record state before sending.
+		String beforeJobStatus = this.jdbc.queryForObject(
+				"SELECT status FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		Long beforeAttemptCount = this.jdbc.queryForObject(
+				"SELECT attempt_count FROM ingestion_job WHERE id = ?", Long.class, jobId.toString());
+		String beforeJobErrorCode = this.jdbc.queryForObject(
+				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		String beforeJobErrorMessage = this.jdbc.queryForObject(
+				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		Long beforeJobVersion = this.jdbc.queryForObject(
+				"SELECT version FROM ingestion_job WHERE id = ?", Long.class, jobId.toString());
+		String beforeRecordStatus = this.jdbc.queryForObject(
+				"SELECT status FROM pos_record WHERE id = ?", String.class, posRecordId.toString());
+		Long beforeRecordVersion = this.jdbc.queryForObject(
+				"SELECT version FROM pos_record WHERE id = ?", Long.class, posRecordId.toString());
+		Integer beforeDocCount = this.jdbc.queryForObject(
+				"SELECT count(*) FROM pos_document WHERE pos_record_id = ?", Integer.class, posRecordId.toString());
+
+		// Record the DLQ depth before sending so we can detect the
+		// exact increment caused by this message.
+		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+
+		// Send a malformed body referencing the real job/record IDs
+		// in the AMQP headers. The validator rejects the body before
+		// any database lookup or storage call, so the real rows must
+		// remain untouched.
 		MessageProperties props = new MessageProperties();
 		props.setContentType("application/json");
 		props.setContentEncoding("UTF-8");
 		props.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
 		props.setType("INGESTION_REQUESTED");
-		props.setMessageId(fakeEventId.toString());
-		props.setCorrelationId(fakeJobId.toString());
+		props.setMessageId(eventId.toString());
+		props.setCorrelationId(jobId.toString());
 		Message bad = new Message("not-json-at-all".getBytes(StandardCharsets.UTF_8), props);
 		this.rabbitTemplate.send(this.topology.exchange(), this.topology.routingKey(), bad);
 
-		// DLQ must receive the message.
+		// DLQ must increase by exactly one.
 		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
-				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) > 0L);
+				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) == dlqBefore + 1L);
 
 		// Give the listener a moment to attempt any DB mutation
 		// (it should not do any).
 		Thread.sleep(2000L);
 
-		// No rows may exist for the fake IDs.
-		Integer jobCount = this.jdbc.queryForObject("SELECT count(*) FROM ingestion_job WHERE id = ?",
-				Integer.class, fakeJobId.toString());
-		Integer recordCount = this.jdbc.queryForObject("SELECT count(*) FROM pos_record WHERE id = ?",
-				Integer.class, fakePosRecordId.toString());
-		Integer docCount = this.jdbc.queryForObject("SELECT count(*) FROM pos_document WHERE pos_record_id = ?",
-				Integer.class, fakePosRecordId.toString());
-		assertEquals(0, jobCount.intValue(), "no ingestion_job row may be created");
-		assertEquals(0, recordCount.intValue(), "no pos_record row may be created");
-		assertEquals(0, docCount.intValue(), "no pos_document row may be created");
+		// The real job/record must be completely unchanged.
+		String afterJobStatus = this.jdbc.queryForObject(
+				"SELECT status FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		Long afterAttemptCount = this.jdbc.queryForObject(
+				"SELECT attempt_count FROM ingestion_job WHERE id = ?", Long.class, jobId.toString());
+		String afterJobErrorCode = this.jdbc.queryForObject(
+				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		String afterJobErrorMessage = this.jdbc.queryForObject(
+				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		Long afterJobVersion = this.jdbc.queryForObject(
+				"SELECT version FROM ingestion_job WHERE id = ?", Long.class, jobId.toString());
+		String afterRecordStatus = this.jdbc.queryForObject(
+				"SELECT status FROM pos_record WHERE id = ?", String.class, posRecordId.toString());
+		Long afterRecordVersion = this.jdbc.queryForObject(
+				"SELECT version FROM pos_record WHERE id = ?", Long.class, posRecordId.toString());
+		Integer afterDocCount = this.jdbc.queryForObject(
+				"SELECT count(*) FROM pos_document WHERE pos_record_id = ?", Integer.class, posRecordId.toString());
+
+		assertEquals(beforeJobStatus, afterJobStatus, "job status must be unchanged");
+		assertEquals(beforeAttemptCount, afterAttemptCount, "job attempt_count must be unchanged");
+		assertEquals(beforeJobErrorCode, afterJobErrorCode, "job error_code must be unchanged");
+		assertEquals(beforeJobErrorMessage, afterJobErrorMessage, "job error_message must be unchanged");
+		assertEquals(beforeJobVersion, afterJobVersion, "job version must be unchanged");
+		assertEquals(beforeRecordStatus, afterRecordStatus, "record status must be unchanged");
+		assertEquals(beforeRecordVersion, afterRecordVersion, "record version must be unchanged");
+		assertEquals(beforeDocCount, afterDocCount, "document count must be unchanged");
 	}
 
 	private void prepareJob(UUID posRecordId, UUID jobId, Instant occurredAt) throws Exception {
