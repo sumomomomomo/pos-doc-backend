@@ -19,6 +19,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -376,9 +377,11 @@ class PdfFirstPageRendererTest {
 
 	@Test
 	void interruptingWaiterRestoresInterruptFlagAndReleasesResources() throws Exception {
-		// Use the test hook to deterministically hold the permit.
+		// Use the test hooks to deterministically hold the permit and
+		// signal when the waiter is about to block on the semaphore.
 		CountDownLatch holderEntered = new CountDownLatch(1);
 		CountDownLatch releaseHolder = new CountDownLatch(1);
+		CountDownLatch waiterAboutToBlock = new CountDownLatch(1);
 		this.renderer.onPermitAcquired = () -> {
 			try {
 				holderEntered.countDown();
@@ -388,6 +391,7 @@ class PdfFirstPageRendererTest {
 				Thread.currentThread().interrupt();
 			}
 		};
+		this.renderer.onBeforePermitAcquire = waiterAboutToBlock::countDown;
 
 		// Thread 1: acquires the permit and blocks inside the hook.
 		CountDownLatch t1Done = new CountDownLatch(1);
@@ -414,27 +418,28 @@ class PdfFirstPageRendererTest {
 		assertTrue(holderEntered.await(10, TimeUnit.SECONDS),
 				"holder thread must acquire the permit");
 
-		// Thread 2: tries to render while the permit is held. It will
-		// block on semaphore.acquire(). We interrupt it while waiting.
+		// Thread 2: tries to render while the permit is held. The
+		// onBeforePermitAcquire hook signals that it is about to block
+		// on semaphore.acquire(), so we can interrupt it deterministically.
 		byte[] pdfBytes = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 WAITER");
 		Path pdfFile = writeTempPdf(pdfBytes);
-		CountDownLatch t2Started = new CountDownLatch(1);
 		AtomicReference<Exception> t2Error = new AtomicReference<>();
+		AtomicBoolean waiterInterrupted = new AtomicBoolean(false);
 		Thread t2 = new Thread(() -> {
-			t2Started.countDown();
 			try (StoredPdfMaterializer.MaterializedPdf pdf = materialize(pdfFile)) {
 				this.renderer.render(pdf, UUID.randomUUID());
 			}
 			catch (Exception e) {
+				waiterInterrupted.set(Thread.currentThread().isInterrupted());
 				t2Error.set(e);
 			}
 		});
 		t2.start();
 
-		// Wait for thread 2 to start (it will block on the semaphore).
-		assertTrue(t2Started.await(10, TimeUnit.SECONDS), "waiter thread must start");
-		// Give thread 2 a moment to reach the semaphore.acquire() call.
-		Thread.sleep(100);
+		// Wait for the waiter to signal it is about to block on the
+		// semaphore. This is deterministic — no Thread.sleep.
+		assertTrue(waiterAboutToBlock.await(10, TimeUnit.SECONDS),
+				"waiter thread must reach semaphore.acquire()");
 
 		// Interrupt the waiter thread while it is blocked on the semaphore.
 		t2.interrupt();
@@ -446,6 +451,9 @@ class PdfFirstPageRendererTest {
 		assertInstanceOf(RenderingException.class, t2Error.get());
 		assertEquals(RenderingException.Code.RENDER_INTERRUPTED,
 				((RenderingException) t2Error.get()).getCode());
+		// The interrupt flag must be restored.
+		assertTrue(waiterInterrupted.get(),
+				"interrupt flag must be restored after RENDER_INTERRUPTED");
 		// The waiter's PDF must be deleted.
 		assertFalse(Files.exists(pdfFile), "waiter PDF must be deleted after interrupt");
 
@@ -457,6 +465,7 @@ class PdfFirstPageRendererTest {
 		// Clear the hooks.
 		this.renderer.onPermitAcquired = null;
 		this.renderer.onPermitReleased = null;
+		this.renderer.onBeforePermitAcquire = null;
 
 		// A subsequent render must succeed, proving no permit leak.
 		byte[] pdfBytes2 = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 POST");
