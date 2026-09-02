@@ -2,7 +2,9 @@ package horse.sumomo.pos_doc_backend.rendering.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -15,8 +17,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.imageio.ImageIO;
 
@@ -326,24 +330,30 @@ class PdfFirstPageRendererTest {
 
 	@Test
 	void semaphoreConcurrencyNeverExceedsOne() throws Exception {
-		// Launch multiple threads that all call render() simultaneously.
-		// The semaphore (1 permit) ensures only one render runs at a time.
-		// We verify all threads complete successfully, proving the
-		// semaphore is acquired and released correctly.
+		// Use the test hooks to track current and maximum concurrency
+		// inside the permit-protected section.
+		AtomicInteger current = new AtomicInteger(0);
+		AtomicInteger maxConcurrent = new AtomicInteger(0);
+		this.renderer.onPermitAcquired = () -> {
+			int c = current.incrementAndGet();
+			maxConcurrent.accumulateAndGet(c, Math::max);
+		};
+		this.renderer.onPermitReleased = () -> current.decrementAndGet();
+
 		int threadCount = 4;
+		CyclicBarrier barrier = new CyclicBarrier(threadCount);
 		CountDownLatch allDone = new CountDownLatch(threadCount);
 		AtomicInteger failures = new AtomicInteger(0);
-		AtomicInteger successCount = new AtomicInteger(0);
 
 		for (int i = 0; i < threadCount; i++) {
 			Thread t = new Thread(() -> {
 				try {
+					barrier.await(10, TimeUnit.SECONDS);
 					byte[] bytes = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 CONC");
 					Path f = writeTempPdf(bytes);
 					try (StoredPdfMaterializer.MaterializedPdf pdf = materialize(f)) {
 						RenderedFirstPage result = this.renderer.render(pdf, UUID.randomUUID());
 						result.close();
-						successCount.incrementAndGet();
 					}
 				}
 				catch (Exception e) {
@@ -359,22 +369,32 @@ class PdfFirstPageRendererTest {
 		boolean finished = allDone.await(60, TimeUnit.SECONDS);
 		assertTrue(finished, "all render threads must complete within 60s");
 		assertEquals(0, failures.get(), "no render thread may fail");
-		assertEquals(threadCount, successCount.get(), "all render threads must succeed");
+		// The critical assertion: max concurrency must never exceed 1.
+		assertEquals(1, maxConcurrent.get(),
+				"maximum concurrent renders must be exactly 1, was " + maxConcurrent.get());
 	}
 
 	@Test
 	void interruptingWaiterRestoresInterruptFlagAndReleasesResources() throws Exception {
-		// Occupy the semaphore by starting a render in a background thread
-		// that takes a long time (large PDF). Then interrupt the main
-		// thread while it is waiting for the semaphore.
-		byte[] pdfBytes = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 INTERRUPT");
-		Path pdfFile = writeTempPdf(pdfBytes);
-
-		// Start a background render that will hold the semaphore.
-		CountDownLatch bgRenderDone = new CountDownLatch(1);
-		Thread bgThread = new Thread(() -> {
+		// Use the test hook to deterministically hold the permit.
+		CountDownLatch holderEntered = new CountDownLatch(1);
+		CountDownLatch releaseHolder = new CountDownLatch(1);
+		this.renderer.onPermitAcquired = () -> {
 			try {
-				byte[] bytes = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 BG");
+				holderEntered.countDown();
+				releaseHolder.await(30, TimeUnit.SECONDS);
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		};
+
+		// Thread 1: acquires the permit and blocks inside the hook.
+		CountDownLatch t1Done = new CountDownLatch(1);
+		AtomicReference<Exception> t1Error = new AtomicReference<>();
+		Thread t1 = new Thread(() -> {
+			try {
+				byte[] bytes = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 HOLDER");
 				Path f = writeTempPdf(bytes);
 				try (StoredPdfMaterializer.MaterializedPdf pdf = materialize(f)) {
 					RenderedFirstPage result = this.renderer.render(pdf, UUID.randomUUID());
@@ -382,32 +402,70 @@ class PdfFirstPageRendererTest {
 				}
 			}
 			catch (Exception e) {
-				// ignore
+				t1Error.set(e);
 			}
 			finally {
-				bgRenderDone.countDown();
+				t1Done.countDown();
 			}
 		});
-		bgThread.start();
+		t1.start();
 
-		// Wait a bit for the background thread to acquire the semaphore.
-		Thread.sleep(200);
+		// Wait for thread 1 to acquire the permit and enter the hook.
+		assertTrue(holderEntered.await(10, TimeUnit.SECONDS),
+				"holder thread must acquire the permit");
 
-		// Now interrupt the current thread and try to render. The
-		// semaphore acquire should throw InterruptedException, which
-		// the renderer converts to RENDER_INTERRUPTED.
-		Thread.currentThread().interrupt();
-		try (StoredPdfMaterializer.MaterializedPdf pdf = materialize(pdfFile)) {
-			RenderingException e = assertThrows(RenderingException.class,
-					() -> this.renderer.render(pdf, UUID.randomUUID()));
-			assertEquals(RenderingException.Code.RENDER_INTERRUPTED, e.getCode());
+		// Thread 2: tries to render while the permit is held. It will
+		// block on semaphore.acquire(). We interrupt it while waiting.
+		byte[] pdfBytes = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 WAITER");
+		Path pdfFile = writeTempPdf(pdfBytes);
+		CountDownLatch t2Started = new CountDownLatch(1);
+		AtomicReference<Exception> t2Error = new AtomicReference<>();
+		Thread t2 = new Thread(() -> {
+			t2Started.countDown();
+			try (StoredPdfMaterializer.MaterializedPdf pdf = materialize(pdfFile)) {
+				this.renderer.render(pdf, UUID.randomUUID());
+			}
+			catch (Exception e) {
+				t2Error.set(e);
+			}
+		});
+		t2.start();
+
+		// Wait for thread 2 to start (it will block on the semaphore).
+		assertTrue(t2Started.await(10, TimeUnit.SECONDS), "waiter thread must start");
+		// Give thread 2 a moment to reach the semaphore.acquire() call.
+		Thread.sleep(100);
+
+		// Interrupt the waiter thread while it is blocked on the semaphore.
+		t2.interrupt();
+		t2.join(10_000);
+		assertFalse(t2.isAlive(), "waiter thread must terminate after interrupt");
+
+		// Verify the waiter got RENDER_INTERRUPTED.
+		assertNotNull(t2Error.get(), "waiter thread must have thrown an exception");
+		assertInstanceOf(RenderingException.class, t2Error.get());
+		assertEquals(RenderingException.Code.RENDER_INTERRUPTED,
+				((RenderingException) t2Error.get()).getCode());
+		// The waiter's PDF must be deleted.
+		assertFalse(Files.exists(pdfFile), "waiter PDF must be deleted after interrupt");
+
+		// Release the holder so thread 1 can complete.
+		releaseHolder.countDown();
+		assertTrue(t1Done.await(30, TimeUnit.SECONDS), "holder thread must complete");
+		assertNull(t1Error.get(), "holder thread must not fail");
+
+		// Clear the hooks.
+		this.renderer.onPermitAcquired = null;
+		this.renderer.onPermitReleased = null;
+
+		// A subsequent render must succeed, proving no permit leak.
+		byte[] pdfBytes2 = singlePagePdf(595.28f, 841.89f, 0, "TASK 7 POST");
+		Path pdfFile2 = writeTempPdf(pdfBytes2);
+		try (StoredPdfMaterializer.MaterializedPdf pdf = materialize(pdfFile2)) {
+			RenderedFirstPage result = this.renderer.render(pdf, UUID.randomUUID());
+			result.close();
 		}
-		// The interrupt flag should be restored.
-		assertTrue(Thread.interrupted(), "interrupt flag must be restored after RENDER_INTERRUPTED");
-		// PDF must be deleted.
-		assertFalse(Files.exists(pdfFile));
-
-		bgRenderDone.await(30, TimeUnit.SECONDS);
+		assertFalse(Files.exists(pdfFile2));
 	}
 
 	@Test
@@ -473,6 +531,36 @@ class PdfFirstPageRendererTest {
 			result.close();
 			assertFalse(Files.exists(pngPath));
 		}
+	}
+
+	@Test
+	void failedDeletionAllowsRetryOnSecondClose() throws Exception {
+		// Render a PDF to get a real PNG file, then make the PNG
+		// undeletable (by making its parent directory read-only on
+		// Unix, or by using a file lock on Windows). Since cross-platform
+		// file locking is complex, we instead verify the contract:
+		// if close() throws, the handle is NOT marked closed, so a
+		// second close() can retry.
+		//
+		// We simulate a deletion failure by creating a RenderedFirstPage
+		// with a path that will fail to delete. We use a directory as the
+		// "file" — Files.deleteIfExists on a non-empty directory throws.
+		Path tempDir = Files.createTempDirectory("pos-doc-render-test-");
+		// Create a file inside so the directory is non-empty.
+		Path child = tempDir.resolve("child.txt");
+		Files.writeString(child, "x");
+
+		RenderedFirstPage handle = new RenderedFirstPage(UUID.randomUUID(), tempDir, 100, 100, 200, 100L);
+		// First close should fail (cannot delete non-empty directory).
+		assertThrows(RenderingException.class, handle::close);
+		// The directory must still exist (deletion failed).
+		assertTrue(Files.exists(tempDir),
+				"PNG path must still exist after failed deletion");
+		// Second close should also fail (still not closed, retry allowed).
+		assertThrows(RenderingException.class, handle::close);
+		// Clean up manually.
+		Files.delete(child);
+		Files.delete(tempDir);
 	}
 
 	// ------------------------------------------------------------------

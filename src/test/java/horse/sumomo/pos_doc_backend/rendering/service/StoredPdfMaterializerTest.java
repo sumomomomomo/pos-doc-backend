@@ -2,6 +2,7 @@ package horse.sumomo.pos_doc_backend.rendering.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -181,26 +182,25 @@ class StoredPdfMaterializerTest {
 		Mockito.when(this.storage.get("documents/x/y.pdf"))
 				.thenReturn(new ByteArrayInputStream(payload));
 
-		// Capture the temp file path by subclassing the materializer.
+		// Capture the temp file path at creation time by overriding
+		// createTempFile().
 		Path[] captured = new Path[1];
 		StoredPdfMaterializer hooked = new StoredPdfMaterializer(this.storage,
 				new FirstPageRenderingProperties(200, FIFTY_MIB, 5000, 5000, 16000000L, 33554432L, 1)) {
 			@Override
-			public MaterializedPdf materialize(DocumentRenderSource src) {
-				try (MaterializedPdf pdf = super.materialize(src)) {
-					captured[0] = pdf.getTempPath();
-					return pdf;
-				}
+			Path createTempFile() throws java.io.IOException {
+				Path p = super.createTempFile();
+				captured[0] = p;
+				return p;
 			}
 		};
 
 		DocumentRenderSource source = source("documents/x/y.pdf", payload.length + 10, hash);
 		assertThrows(RenderingException.class, () -> hooked.materialize(source));
-		// The temp file must have been deleted by the materializer.
-		if (captured[0] != null) {
-			assertFalse(Files.exists(captured[0]),
-					"temp PDF file must be deleted after size mismatch failure");
-		}
+		// The temp file path was captured at creation time; assert it is gone.
+		assertNotNull(captured[0], "temp file path must be captured at creation");
+		assertFalse(Files.exists(captured[0]),
+				"temp PDF file must be deleted after size mismatch failure");
 	}
 
 	@Test
@@ -214,20 +214,18 @@ class StoredPdfMaterializerTest {
 		StoredPdfMaterializer hooked = new StoredPdfMaterializer(this.storage,
 				new FirstPageRenderingProperties(200, FIFTY_MIB, 5000, 5000, 16000000L, 33554432L, 1)) {
 			@Override
-			public MaterializedPdf materialize(DocumentRenderSource src) {
-				try (MaterializedPdf pdf = super.materialize(src)) {
-					captured[0] = pdf.getTempPath();
-					return pdf;
-				}
+			Path createTempFile() throws java.io.IOException {
+				Path p = super.createTempFile();
+				captured[0] = p;
+				return p;
 			}
 		};
 
 		DocumentRenderSource source = source("documents/x/y.pdf", payload.length, wrongHash);
 		assertThrows(RenderingException.class, () -> hooked.materialize(source));
-		if (captured[0] != null) {
-			assertFalse(Files.exists(captured[0]),
-					"temp PDF file must be deleted after hash mismatch failure");
-		}
+		assertNotNull(captured[0], "temp file path must be captured at creation");
+		assertFalse(Files.exists(captured[0]),
+				"temp PDF file must be deleted after hash mismatch failure");
 	}
 
 	@Test

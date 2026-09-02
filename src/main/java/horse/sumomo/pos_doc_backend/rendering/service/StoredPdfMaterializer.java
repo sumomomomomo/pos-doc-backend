@@ -67,7 +67,7 @@ public class StoredPdfMaterializer {
 
 		Path tempFile;
 		try {
-			tempFile = Files.createTempFile(TEMP_PREFIX, TEMP_SUFFIX);
+			tempFile = createTempFile();
 		}
 		catch (IOException e) {
 			throw new RenderingException(RenderingException.Code.TEMP_STORAGE_UNAVAILABLE, e);
@@ -129,6 +129,14 @@ public class StoredPdfMaterializer {
 
 		log.debug("PDF materialized; documentId={}, byteSize={}", source.documentId(), observedSize);
 		return new MaterializedPdf(tempFile, observedSize);
+	}
+
+	/**
+	 * Creates a temporary file for the downloaded PDF. Package-private and
+	 * overridable so tests can capture the path at creation time.
+	 */
+	Path createTempFile() throws IOException {
+		return Files.createTempFile(TEMP_PREFIX, TEMP_SUFFIX);
 	}
 
 	private InputStream openStream(String objectKey) {

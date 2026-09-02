@@ -51,6 +51,14 @@ public class PdfFirstPageRenderer {
 	private final FirstPageRenderingProperties properties;
 	private final Semaphore renderPermit;
 
+	/**
+	 * Optional test hook invoked after the permit is acquired and before
+	 * {@link #doRender} is called, and again after the permit is released.
+	 * Package-private; null in production.
+	 */
+	Runnable onPermitAcquired;
+	Runnable onPermitReleased;
+
 	public PdfFirstPageRenderer(FirstPageRenderingProperties properties) {
 		this.properties = properties;
 		this.renderPermit = new Semaphore(properties.maxConcurrentRenders(), true);
@@ -80,10 +88,16 @@ public class PdfFirstPageRenderer {
 		}
 
 		try {
+			if (this.onPermitAcquired != null) {
+				this.onPermitAcquired.run();
+			}
 			return doRender(pdf, documentId);
 		}
 		finally {
 			if (permitAcquired) {
+				if (this.onPermitReleased != null) {
+					this.onPermitReleased.run();
+				}
 				this.renderPermit.release();
 			}
 		}
