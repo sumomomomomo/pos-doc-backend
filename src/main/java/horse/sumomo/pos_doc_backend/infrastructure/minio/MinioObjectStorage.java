@@ -74,7 +74,7 @@ public class MinioObjectStorage {
 		}
 		catch (ErrorResponseException e) {
 			if (isNoSuchKey(e)) {
-				throw new ObjectStorageException("Object not found: " + objectKey, e);
+				throw new ObjectStorageException.MissingObjectException("Object not found: " + objectKey, e);
 			}
 			throw new ObjectStorageException("Failed to get object: " + objectKey, e);
 		}
@@ -120,7 +120,7 @@ public class MinioObjectStorage {
 		}
 		catch (ErrorResponseException e) {
 			if (isNoSuchKey(e)) {
-				throw new ObjectStorageException("Object not found: " + objectKey, e);
+				throw new ObjectStorageException.MissingObjectException("Object not found: " + objectKey, e);
 			}
 			throw new ObjectStorageException("Failed to stat object: " + objectKey, e);
 		}

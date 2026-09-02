@@ -124,14 +124,12 @@ public class SourceArchiveDownloader {
 		try {
 			return this.storage.get(objectKey);
 		}
+		catch (ObjectStorageException.MissingObjectException e) {
+			// A missing key is a nonretryable data-integrity error.
+			throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_MISSING, e);
+		}
 		catch (ObjectStorageException e) {
-			// A missing key is a nonretryable data-integrity error; other
-			// storage failures are mapped to a retryable category by the
-			// adapter.
-			String message = e.getMessage();
-			if (message != null && message.contains("Object not found")) {
-				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_MISSING, e);
-			}
+			// Other storage failures are retryable.
 			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
 		}
 	}

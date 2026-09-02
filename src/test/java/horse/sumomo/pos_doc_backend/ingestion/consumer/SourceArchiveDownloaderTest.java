@@ -74,7 +74,8 @@ class SourceArchiveDownloaderTest {
 	@Test
 	void missingObjectIsReportedAsArchiveMissing() {
 		Mockito.when(this.storage.get("archives/missing.zip"))
-				.thenThrow(new ObjectStorageException("Object not found: archives/missing.zip"));
+				.thenThrow(new ObjectStorageException.MissingObjectException("Object not found: archives/missing.zip",
+						new RuntimeException("NoSuchKey")));
 
 		ConsumerException e = assertThrows(ConsumerException.class,
 				() -> this.downloader.download("archives/missing.zip", 1L, "0".repeat(64)));
