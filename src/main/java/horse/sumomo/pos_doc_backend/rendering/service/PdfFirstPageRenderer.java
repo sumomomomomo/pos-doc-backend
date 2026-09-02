@@ -59,6 +59,14 @@ public class PdfFirstPageRenderer {
 	Runnable onPermitAcquired;
 	Runnable onPermitReleased;
 
+	/**
+	 * Optional test hook invoked just before {@code renderPermit.acquire()}
+	 * is called. Package-private; null in production. Allows tests to
+	 * deterministically signal that a thread is about to block on the
+	 * semaphore.
+	 */
+	Runnable onBeforePermitAcquire;
+
 	public PdfFirstPageRenderer(FirstPageRenderingProperties properties) {
 		this.properties = properties;
 		this.renderPermit = new Semaphore(properties.maxConcurrentRenders(), true);
@@ -78,6 +86,9 @@ public class PdfFirstPageRenderer {
 		// the sanitized RENDER_INTERRUPTED failure.
 		boolean permitAcquired = false;
 		try {
+			if (this.onBeforePermitAcquire != null) {
+				this.onBeforePermitAcquire.run();
+			}
 			this.renderPermit.acquire();
 			permitAcquired = true;
 		}
@@ -207,14 +218,31 @@ public class PdfFirstPageRenderer {
 			try (var fileOut = Files.newOutputStream(pngPath,
 					java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
 					var boundedOut = new BoundedOutputStream(fileOut, this.properties.maxPngBytes())) {
-				boolean written = ImageIO.write(image, "png", boundedOut);
+				boolean written;
+				try {
+					written = ImageIO.write(image, "png", boundedOut);
+				}
+				catch (IOException e) {
+					// ImageIO.write() can throw IOException for both
+					// encoding failures and underlying filesystem
+					// failures (disk full, permission denied). Map to
+					// TEMP_STORAGE_UNAVAILABLE since the most common
+					// cause in production is a storage problem.
+					deleteQuietly(pngPath);
+					throw new RenderingException(RenderingException.Code.TEMP_STORAGE_UNAVAILABLE, e);
+				}
 				if (!written) {
+					// ImageIO.write() returned false: no PNG writer
+					// available for this image type.
+					deleteQuietly(pngPath);
 					throw new RenderingException(RenderingException.Code.RENDER_FAILED);
 				}
 			}
 			catch (IOException e) {
+				// Local file I/O failure (disk full, filesystem error,
+				// permission denied) — retryable storage problem.
 				deleteQuietly(pngPath);
-				throw new RenderingException(RenderingException.Code.RENDER_FAILED, e);
+				throw new RenderingException(RenderingException.Code.TEMP_STORAGE_UNAVAILABLE, e);
 			}
 
 			// Verify the finished file begins with the eight-byte PNG
@@ -225,14 +253,24 @@ public class PdfFirstPageRenderer {
 				actualSize = Files.size(pngPath);
 			}
 			catch (IOException e) {
+				// Local file I/O failure (disk full, filesystem error).
 				deleteQuietly(pngPath);
-				throw new RenderingException(RenderingException.Code.RENDER_FAILED, e);
+				throw new RenderingException(RenderingException.Code.TEMP_STORAGE_UNAVAILABLE, e);
 			}
 			if (actualSize <= 0 || actualSize > this.properties.maxPngBytes()) {
 				deleteQuietly(pngPath);
 				throw new RenderingException(RenderingException.Code.RENDER_LIMIT_EXCEEDED);
 			}
-			if (!hasPngSignature(pngPath)) {
+			boolean validSignature;
+			try {
+				validSignature = hasPngSignature(pngPath);
+			}
+			catch (IOException e) {
+				// Local file I/O failure (disk full, filesystem error).
+				deleteQuietly(pngPath);
+				throw new RenderingException(RenderingException.Code.TEMP_STORAGE_UNAVAILABLE, e);
+			}
+			if (!validSignature) {
 				deleteQuietly(pngPath);
 				throw new RenderingException(RenderingException.Code.RENDER_FAILED);
 			}
@@ -286,7 +324,7 @@ public class PdfFirstPageRenderer {
 		return normalized;
 	}
 
-	private static boolean hasPngSignature(Path path) {
+	private static boolean hasPngSignature(Path path) throws IOException {
 		try (InputStream in = Files.newInputStream(path)) {
 			byte[] header = new byte[PNG_SIGNATURE.length];
 			int read = 0;
@@ -303,9 +341,6 @@ public class PdfFirstPageRenderer {
 				}
 			}
 			return true;
-		}
-		catch (IOException e) {
-			return false;
 		}
 	}
 
