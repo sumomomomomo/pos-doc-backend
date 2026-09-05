@@ -139,22 +139,29 @@ public final class LlamaCppOcrClient {
 			throw new OcrException(Code.OCR_PROTOCOL_ERROR);
 		}
 
-		// Read the response body with a bounded stream.
+		// Read the response body with a bounded stream, parse through a
+		// JsonParser to reject trailing content, and validate the structure.
 		try (InputStream boundedStream = new BoundedInputStream(responseBody.byteStream(),
 				this.properties.maxResponseBytes())) {
 			JsonNode root;
-			try {
-				root = this.objectMapper.readTree(boundedStream);
+			try (com.fasterxml.jackson.core.JsonParser parser = this.objectMapper.getFactory()
+					.createParser(boundedStream)) {
+				root = this.objectMapper.readTree(parser);
+				// Reject trailing non-whitespace content after the root JSON value.
+				if (root == null) {
+					throw new OcrException(Code.OCR_RESPONSE_INVALID);
+				}
+				com.fasterxml.jackson.core.JsonToken next = parser.nextToken();
+				if (next != null) {
+					throw new OcrException(Code.OCR_RESPONSE_INVALID);
+				}
+			}
+			catch (OcrException e) {
+				throw e;
 			}
 			catch (IOException e) {
-				response.close();
 				throw new OcrException(Code.OCR_RESPONSE_INVALID, e);
 			}
-
-			// Reject trailing non-whitespace content after the root JSON object.
-			// readTree already consumed the root; check for trailing content.
-			// (Jackson's readTree does not reject trailing content by default,
-			// so we use a more strict approach below.)
 
 			// Validate the response structure.
 			String text = validateAndExtract(root, documentId);
@@ -223,24 +230,28 @@ public final class LlamaCppOcrClient {
 			throw new OcrException(Code.OCR_RESPONSE_INVALID);
 		}
 
-		// If usage is present, validate only that token counts are non-negative.
+		// If usage is present, validate only that token counts are non-negative
+		// integers. Reject non-numeric types.
 		JsonNode usage = root.get("usage");
 		if (usage != null && usage.isObject()) {
-			JsonNode promptTokens = usage.get("prompt_tokens");
-			if (promptTokens != null && promptTokens.isNumber() && promptTokens.asInt() < 0) {
-				throw new OcrException(Code.OCR_RESPONSE_INVALID);
-			}
-			JsonNode completionTokens = usage.get("completion_tokens");
-			if (completionTokens != null && completionTokens.isNumber() && completionTokens.asInt() < 0) {
-				throw new OcrException(Code.OCR_RESPONSE_INVALID);
-			}
-			JsonNode totalTokens = usage.get("total_tokens");
-			if (totalTokens != null && totalTokens.isNumber() && totalTokens.asInt() < 0) {
-				throw new OcrException(Code.OCR_RESPONSE_INVALID);
-			}
+			validateUsageField(usage.get("prompt_tokens"));
+			validateUsageField(usage.get("completion_tokens"));
+			validateUsageField(usage.get("total_tokens"));
 		}
 
 		return text;
+	}
+
+	private static void validateUsageField(JsonNode field) {
+		if (field == null || field.isNull()) {
+			return;
+		}
+		if (!field.isIntegralNumber()) {
+			throw new OcrException(Code.OCR_RESPONSE_INVALID);
+		}
+		if (field.asInt() < 0) {
+			throw new OcrException(Code.OCR_RESPONSE_INVALID);
+		}
 	}
 
 	private static boolean isJsonContentType(MediaType mediaType) {
@@ -295,8 +306,13 @@ public final class LlamaCppOcrClient {
 	}
 
 	/**
-	 * A bounded input stream that throws before more than {@code maxBytes}
+	 * A bounded input stream that throws when more than {@code maxBytes}
 	 * are consumed.
+	 *
+	 * <p>Limiting is based on bytes actually read, not the caller's requested
+	 * buffer size. When exactly at the limit, a one-byte probe is permitted
+	 * so that EOF succeeds while an additional byte produces
+	 * {@link Code#OCR_RESPONSE_TOO_LARGE}.
 	 */
 	static final class BoundedInputStream extends InputStream {
 
@@ -315,7 +331,15 @@ public final class LlamaCppOcrClient {
 
 		@Override
 		public int read() throws IOException {
-			checkLimit(1L);
+			if (this.count >= this.maxBytes) {
+				// At the limit: probe one byte. If EOF, return -1.
+				// If a byte is available, it exceeds the limit.
+				int b = this.delegate.read();
+				if (b == -1) {
+					return -1;
+				}
+				throw new OcrException(Code.OCR_RESPONSE_TOO_LARGE);
+			}
 			int b = this.delegate.read();
 			if (b != -1) {
 				this.count++;
@@ -328,8 +352,21 @@ public final class LlamaCppOcrClient {
 			if (len < 0) {
 				throw new IndexOutOfBoundsException("len must not be negative");
 			}
-			checkLimit(len);
-			int n = this.delegate.read(buf, off, len);
+			if (len == 0) {
+				return 0;
+			}
+			if (this.count >= this.maxBytes) {
+				// At the limit: probe one byte. If EOF, return -1.
+				// If a byte is available, it exceeds the limit.
+				int b = this.delegate.read();
+				if (b == -1) {
+					return -1;
+				}
+				throw new OcrException(Code.OCR_RESPONSE_TOO_LARGE);
+			}
+			// Limit the read to the remaining allowance.
+			int remaining = (int) Math.min(len, this.maxBytes - this.count);
+			int n = this.delegate.read(buf, off, remaining);
 			if (n > 0) {
 				this.count += n;
 			}
@@ -344,12 +381,6 @@ public final class LlamaCppOcrClient {
 		@Override
 		public void close() throws IOException {
 			this.delegate.close();
-		}
-
-		private void checkLimit(long additional) {
-			if (additional > this.maxBytes - this.count) {
-				throw new OcrException(Code.OCR_RESPONSE_TOO_LARGE);
-			}
 		}
 
 	}

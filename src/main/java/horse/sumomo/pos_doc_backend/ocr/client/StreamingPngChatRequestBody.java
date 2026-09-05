@@ -33,7 +33,7 @@ import okio.BufferedSink;
  *
  * <p>{@link #toString()} omits the PNG path and any image data.
  */
-final class StreamingPngChatRequestBody extends RequestBody {
+class StreamingPngChatRequestBody extends RequestBody {
 
 	private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json");
 
@@ -110,34 +110,52 @@ final class StreamingPngChatRequestBody extends RequestBody {
 		}
 
 		// 2. Write the JSON prefix.
-		//    Produces: {"model":"<MODEL>","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"
 		sink.write(buildJsonPrefix());
 
 		// 3. Write the data URL scheme prefix.
 		sink.write("data:image/png;base64,".getBytes(StandardCharsets.UTF_8));
 
 		// 4. Stream the PNG file through Base64 with an 8192-byte buffer.
+		//    File read failures map to OCR_IMAGE_UNAVAILABLE.
+		//    Sink write failures propagate as IOException (transport errors).
+		//    Base64 finalization failures propagate.
 		OutputStream nonClosingSink = new NonClosingOutputStream(sink);
 		OutputStream base64Stream = Base64.getEncoder().wrap(nonClosingSink);
 		long rawByteCount = 0L;
 		byte[] copyBuffer = new byte[COPY_BUFFER_SIZE];
-
-		try (InputStream in = Files.newInputStream(this.pngPath)) {
+		InputStream in;
+		try {
+			in = openInputStream(this.pngPath);
+		}
+		catch (IOException e) {
+			throw new OcrException(Code.OCR_IMAGE_UNAVAILABLE, e);
+		}
+		try (InputStream fileIn = in) {
 			// Validate the PNG signature from the first 8 raw bytes.
 			byte[] signatureBuffer = new byte[PNG_SIGNATURE.length];
 			int sigBytesRead = 0;
-			while (sigBytesRead < PNG_SIGNATURE.length) {
-				int n = in.read(signatureBuffer, sigBytesRead, PNG_SIGNATURE.length - sigBytesRead);
-				if (n == -1) {
-					throw new OcrException(Code.OCR_IMAGE_INVALID);
+			try {
+				while (sigBytesRead < PNG_SIGNATURE.length) {
+					int n = fileIn.read(signatureBuffer, sigBytesRead, PNG_SIGNATURE.length - sigBytesRead);
+					if (n == -1) {
+						throw new OcrException(Code.OCR_IMAGE_INVALID);
+					}
+					sigBytesRead += n;
 				}
-				sigBytesRead += n;
+			}
+			catch (OcrException e) {
+				throw e;
+			}
+			catch (IOException e) {
+				throw new OcrException(Code.OCR_IMAGE_UNAVAILABLE, e);
 			}
 			for (int i = 0; i < PNG_SIGNATURE.length; i++) {
 				if (signatureBuffer[i] != PNG_SIGNATURE[i]) {
 					throw new OcrException(Code.OCR_IMAGE_INVALID);
 				}
 			}
+			// Writing to the sink may throw IOException (transport error).
+			// Let it propagate; do NOT map to OCR_IMAGE_UNAVAILABLE.
 			base64Stream.write(signatureBuffer, 0, PNG_SIGNATURE.length);
 			rawByteCount += PNG_SIGNATURE.length;
 			if (rawByteCount > this.maxImageBytes) {
@@ -145,7 +163,7 @@ final class StreamingPngChatRequestBody extends RequestBody {
 			}
 
 			int bytesRead;
-			while ((bytesRead = in.read(copyBuffer)) != -1) {
+			while ((bytesRead = readBounded(fileIn, copyBuffer)) != -1) {
 				rawByteCount += bytesRead;
 				if (rawByteCount > this.expectedPngByteSize) {
 					throw new OcrException(Code.OCR_IMAGE_INVALID);
@@ -153,18 +171,26 @@ final class StreamingPngChatRequestBody extends RequestBody {
 				if (rawByteCount > this.maxImageBytes) {
 					throw new OcrException(Code.OCR_IMAGE_INVALID);
 				}
+				// Writing to the sink may throw IOException (transport error).
+				// Let it propagate; do NOT map to OCR_IMAGE_UNAVAILABLE.
 				base64Stream.write(copyBuffer, 0, bytesRead);
 			}
 		}
+		catch (OcrException e) {
+			throw e;
+		}
 		catch (IOException e) {
-			throw new OcrException(Code.OCR_IMAGE_UNAVAILABLE, e);
+			// Distinguish file read failures from sink write failures.
+			// If the exception came from reading the file, it's OCR_IMAGE_UNAVAILABLE.
+			// If it came from writing to the sink, it's a transport error.
+			// Since we can't easily distinguish, and the file was already opened
+			// successfully, treat IOException here as a transport/sink failure
+			// and let it propagate. The file read is wrapped separately above.
+			throw e;
 		}
 		finally {
-			try {
-				base64Stream.close();
-			}
-			catch (IOException ignored) {
-			}
+			// Base64 finalization writes padding. Failure must propagate.
+			base64Stream.close();
 		}
 
 		// 5. At EOF, require the raw byte count to equal the expected size.
@@ -173,9 +199,29 @@ final class StreamingPngChatRequestBody extends RequestBody {
 		}
 
 		// 6. Write the JSON suffix and flush.
-		//    Produces: "}}},{"type":"text","text":"<PROMPT>"}]},"temperature":<T>,"top_p":<P>,"max_tokens":<N>,"n":1,"stream":false}
 		sink.write(buildJsonSuffix());
 		sink.flush();
+	}
+
+	/**
+	 * Package-private seam for opening the PNG input stream. Tests can
+	 * override this to inject a controllable input stream.
+	 */
+	InputStream openInputStream(Path path) throws IOException {
+		return Files.newInputStream(path);
+	}
+
+	/**
+	 * Reads up to {@code buffer.length} bytes from the input stream.
+	 * File read failures are mapped to {@link Code#OCR_IMAGE_UNAVAILABLE}.
+	 */
+	private static int readBounded(InputStream in, byte[] buffer) throws IOException {
+		try {
+			return in.read(buffer);
+		}
+		catch (IOException e) {
+			throw new OcrException(Code.OCR_IMAGE_UNAVAILABLE, e);
+		}
 	}
 
 	private byte[] buildJsonPrefix() {
