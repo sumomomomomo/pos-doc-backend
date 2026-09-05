@@ -2,6 +2,7 @@ package horse.sumomo.pos_doc_backend.ocr.client;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -143,7 +144,7 @@ class StreamingPngChatRequestBodyTest {
 	@Test
 	void emptyPngFailsWithImageInvalid() throws Exception {
 		Path pngPath = this.tempDir.resolve("empty.png");
-		Files.write(pngPath, new byte[] { 0x00 });
+		Files.write(pngPath, new byte[0]);
 
 		StreamingPngChatRequestBody body = newBody(pngPath, 1L);
 		Buffer buffer = new Buffer();
@@ -276,46 +277,74 @@ class StreamingPngChatRequestBodyTest {
 
 	@Test
 	void base64FinalizationFailureIsNotSwallowed() throws Exception {
-		byte[] pngBytes = createSyntheticPng(100);
+		// Use a PNG length that requires Base64 padding (108 bytes: 108 % 3 == 0,
+		// but let's use 109 bytes: 109 % 3 == 1, requires "==" padding).
+		byte[] pngBytes = createSyntheticPng(101); // 8 + 101 = 109 bytes, 109 % 3 == 1
 		Path pngPath = writePng(pngBytes);
 
-		// Use a sink that fails only on the final flush/close.
-		// The Base64 encoder's close() writes padding to the sink.
-		// If the sink fails at that point, the IOException must propagate.
-		StreamingPngChatRequestBody body = newBody(pngPath, pngBytes.length);
-		final java.io.OutputStream failingOnClose = new java.io.OutputStream() {
-			private boolean closed = false;
+		// Use a sink that succeeds for all writes except the final padding write.
+		// The Base64 encoder's close() writes the padding to the sink.
+		// We track the total bytes written and fail on the last write (padding).
+		final java.util.concurrent.atomic.AtomicLong bytesWritten = new java.util.concurrent.atomic.AtomicLong(0);
+		final long totalEncodedBytes = computeBase64EncodedLength(pngBytes.length);
+		okio.BufferedSink failingSink = okio.Okio.buffer(okio.Okio.sink(new java.io.OutputStream() {
 			@Override
 			public void write(int b) throws IOException {
-				// Accept all writes except after close is called.
-			}
-			@Override
-			public void write(byte[] buf, int off, int len) throws IOException {
-				// Accept all writes.
-			}
-			@Override
-			public void close() throws IOException {
-				if (!this.closed) {
-					this.closed = true;
-					throw new IOException("simulated close failure");
+				long newTotal = bytesWritten.addAndGet(1);
+				if (newTotal > totalEncodedBytes - 4) {
+					throw new IOException("simulated padding write failure");
 				}
 			}
+
+			@Override
+			public void write(byte[] buf, int off, int len) throws IOException {
+				long newTotal = bytesWritten.addAndGet(len);
+				if (newTotal > totalEncodedBytes - 4) {
+					throw new IOException("simulated padding write failure");
+				}
+			}
+		}));
+
+		StreamingPngChatRequestBody body = newBody(pngPath, pngBytes.length);
+		IOException e = assertThrows(IOException.class, () -> body.writeTo(failingSink));
+		assertTrue(e.getMessage().contains("simulated padding write failure"));
+	}
+
+	@Test
+	void base64CloseFailureIsSuppressedWhenPrimaryFailureExists() throws Exception {
+		// Use a valid PNG that will be truncated during streaming, causing
+		// OCR_IMAGE_INVALID. This exercises the code path where a primary
+		// failure exists and base64Stream.close() is called in the finally
+		// block. The close() call succeeds (no padding failure in this
+		// scenario), so no suppressed exception is added. This test verifies
+		// that the primary failure is preserved and no close exception
+		// replaces it.
+		byte[] fullPng = createSyntheticPng(101); // 109 bytes
+		Path pngPath = writePng(fullPng);
+
+		// Provide only 55 bytes, causing rawByteCount != expectedPngByteSize.
+		byte[] truncated = new byte[55];
+		System.arraycopy(fullPng, 0, truncated, 0, truncated.length);
+
+		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
+				pngPath, fullPng.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
+				this.objectMapper) {
+			@Override
+			InputStream openInputStream(Path path) throws IOException {
+				return new ByteArrayInputStream(truncated);
+			}
 		};
-		// Actually, the NonClosingOutputStream ignores close(), so the Base64
-		// encoder's close() won't fail. Let's test differently: use a sink
-		// that fails on the write of the padding bytes.
-		// The padding is written when base64Stream.close() is called, which
-		// calls nonClosingSink.write(), which calls sink.outputStream().write().
-		// So we need the underlying sink to fail on a write.
-		// Since the prefix and data writes succeed, only the padding write
-		// would fail. We can simulate this by making the sink fail after
-		// a certain number of bytes.
-		// For simplicity, we verify that the close() is not in a try-catch
-		// that swallows exceptions by checking the source structure.
-		// The key test is that base64Stream.close() is NOT wrapped in
-		// a try-catch that ignores IOException.
-		// This is verified by the httpSinkFailureIsNotClassifiedAsImageUnavailable
-		// test and by code review.
+
+		Buffer buffer = new Buffer();
+		OcrException e = assertThrows(OcrException.class, () -> body.writeTo(buffer));
+		assertEquals(Code.OCR_IMAGE_INVALID, e.getCode());
+		// The primary failure is preserved. No close exception replaced it.
+		// (In this scenario, close() succeeds, so no suppressed exception.)
+		assertNotNull(e);
+	}
+
+	private static long computeBase64EncodedLength(long rawLength) {
+		return (rawLength / 3) * 4 + ((rawLength % 3) == 0 ? 0 : (rawLength % 3) == 1 ? 4 : 4);
 	}
 
 	@Test

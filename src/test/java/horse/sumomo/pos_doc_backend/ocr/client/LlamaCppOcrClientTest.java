@@ -27,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -696,29 +697,67 @@ class LlamaCppOcrClientTest {
 					"First request did not arrive at the server in time");
 
 			// Start a second caller that will be queued on the semaphore.
-			final Thread[] waitingThread = new Thread[1];
-			final CountDownLatch waitingStarted = new CountDownLatch(1);
+			// Use a latch to detect when the second caller has started,
+			// and record the interrupt flag inside the thread.
+			final CountDownLatch secondStarted = new CountDownLatch(1);
+			final CountDownLatch secondDone = new CountDownLatch(1);
 			final AtomicReference<Throwable> secondError = new AtomicReference<>();
+			final AtomicBoolean interruptFlagRestored = new AtomicBoolean(false);
 			Thread secondThread = new Thread(() -> {
-				waitingStarted.countDown();
+				secondStarted.countDown();
 				try {
 					client.recognize(page);
 				}
 				catch (Throwable t) {
+					// Record the interrupt flag immediately after catching.
+					interruptFlagRestored.set(Thread.currentThread().isInterrupted());
 					secondError.set(t);
 				}
+				finally {
+					secondDone.countDown();
+				}
 			});
-			waitingThread[0] = secondThread;
 			secondThread.start();
 
-			// Wait for the second thread to start and be queued.
-			assertTrue(waitingStarted.await(2, TimeUnit.SECONDS), "Second thread did not start");
-			// Give it time to reach the semaphore acquire.
-			Thread.yield();
+			// Wait for the second thread to start.
+			assertTrue(secondStarted.await(2, TimeUnit.SECONDS), "Second thread did not start");
+
+			// Deterministic evidence that the second caller is queued on the semaphore:
+			// The server has only seen one request so far (the first one is blocked
+			// on releaseFirstRequest). If the second caller were not blocked on the
+			// semaphore, it would have made a second HTTP request to the server.
+			// We verify this by checking that the server has not recorded a second
+			// request. We use a bounded wait to allow the second caller to reach
+			// the semaphore acquire.
+			// Since we can't use Thread.sleep, we use a short bounded wait on a
+			// latch that will never fire (as a timeout mechanism).
+			CountDownLatch queueEvidence = new CountDownLatch(1);
+			executor.submit(() -> {
+				// Wait a short time for the second caller to reach the semaphore.
+				// We can't use Thread.sleep, so we use a latch with a timeout.
+				try {
+					// This latch will never be counted down; we use the timeout
+					// as a bounded wait.
+					queueEvidence.await(100, TimeUnit.MILLISECONDS);
+				}
+				catch (InterruptedException ignored) {
+					Thread.currentThread().interrupt();
+				}
+			});
+			// The above submit is just to get a bounded wait without Thread.sleep.
+			// Actually, let's just use a simple bounded wait on a latch.
+			// We'll use the secondDone latch with a very short timeout to check
+			// if the second caller has already completed (it shouldn't have).
+			assertFalse(secondDone.await(50, TimeUnit.MILLISECONDS),
+					"Second caller completed too quickly; not blocked on semaphore");
+
+			// The server should have seen exactly 1 request (the first one).
+			assertEquals(1, this.recordedRequests.size(),
+					"Expected exactly 1 request at the server, but got " + this.recordedRequests.size());
 
 			// Interrupt the waiting thread.
 			secondThread.interrupt();
-			secondThread.join(5000);
+			assertTrue(secondDone.await(5, TimeUnit.SECONDS), "Second thread did not complete");
 
 			// Assert OCR_INTERRUPTED.
 			assertNotNull(secondError.get(), "Second thread should have thrown");
@@ -728,11 +767,8 @@ class LlamaCppOcrClientTest {
 					((OcrException) secondError.get()).getCode());
 
 			// Assert the interrupt flag was restored.
-			// The thread has finished, so we check via the exception's cause
-			// or by verifying the thread was interrupted. Since the thread
-			// has joined, we verify the interrupt was handled by checking
-			// that the exception is OCR_INTERRUPTED (which requires the
-			// interrupt flag to have been set).
+			assertTrue(interruptFlagRestored.get(),
+					"Interrupt flag was not restored after OCR_INTERRUPTED");
 
 			// Release the first request.
 			this.releaseFirstRequest.countDown();
@@ -812,10 +848,13 @@ class LlamaCppOcrClientTest {
 				}
 			}
 
-			// Read body with a capture limit.
+			// Read body with a capture limit. Use a fixed-size copy buffer
+			// to avoid unbounded allocation based on declared sizes.
 			String transferEncoding = headers.get("transfer-encoding");
 			ByteArrayOutputStream bodyBuffer = new ByteArrayOutputStream();
 			long totalCaptured = 0;
+			final int COPY_BUF_SIZE = 8192;
+			final byte[] copyBuf = new byte[COPY_BUF_SIZE];
 			if (transferEncoding != null && transferEncoding.toLowerCase().contains("chunked")) {
 				while (true) {
 					String sizeLine = readLine(in);
@@ -824,51 +863,63 @@ class LlamaCppOcrClientTest {
 					}
 					int semicolon = sizeLine.indexOf(';');
 					String sizeStr = semicolon >= 0 ? sizeLine.substring(0, semicolon) : sizeLine;
-					int chunkSize;
+					long chunkSize;
 					try {
-						chunkSize = Integer.parseInt(sizeStr.trim(), 16);
+						chunkSize = Long.parseLong(sizeStr.trim(), 16);
 					}
 					catch (NumberFormatException e) {
 						break;
+					}
+					if (chunkSize < 0) {
+						throw new IOException("Negative chunk size");
 					}
 					if (chunkSize == 0) {
 						readLine(in);
 						break;
 					}
-					byte[] chunk = new byte[chunkSize];
-					int totalRead = 0;
-					while (totalRead < chunkSize) {
-						int n = in.read(chunk, totalRead, chunkSize - totalRead);
+					if (chunkSize > MAX_CAPTURE_BYTES - totalCaptured) {
+						throw new IOException("Chunk size exceeds remaining capture allowance");
+					}
+					long remaining = chunkSize;
+					while (remaining > 0) {
+						int toRead = (int) Math.min(remaining, COPY_BUF_SIZE);
+						int n = in.read(copyBuf, 0, toRead);
 						if (n == -1) {
 							break;
 						}
-						totalRead += n;
+						bodyBuffer.write(copyBuf, 0, n);
+						totalCaptured += n;
+						remaining -= n;
+						if (totalCaptured > MAX_CAPTURE_BYTES) {
+							throw new IOException("Request body exceeds capture limit");
+						}
 					}
-					totalCaptured += totalRead;
-					if (totalCaptured > MAX_CAPTURE_BYTES) {
-						throw new IOException("Request body exceeds capture limit");
-					}
-					bodyBuffer.write(chunk, 0, totalRead);
 					readLine(in);
 				}
 			}
 			else {
 				String contentLengthStr = headers.get("content-length");
-				int contentLength = contentLengthStr != null ? Integer.parseInt(contentLengthStr) : 0;
-				byte[] body = new byte[contentLength];
-				int totalRead = 0;
-				while (totalRead < contentLength) {
-					int n = in.read(body, totalRead, contentLength - totalRead);
+				long contentLength = contentLengthStr != null ? Long.parseLong(contentLengthStr) : 0;
+				if (contentLength < 0) {
+					throw new IOException("Negative content length");
+				}
+				if (contentLength > MAX_CAPTURE_BYTES) {
+					throw new IOException("Content length exceeds capture limit");
+				}
+				long remaining = contentLength;
+				while (remaining > 0) {
+					int toRead = (int) Math.min(remaining, COPY_BUF_SIZE);
+					int n = in.read(copyBuf, 0, toRead);
 					if (n == -1) {
 						break;
 					}
-					totalRead += n;
+					bodyBuffer.write(copyBuf, 0, n);
 					totalCaptured += n;
+					remaining -= n;
 					if (totalCaptured > MAX_CAPTURE_BYTES) {
 						throw new IOException("Request body exceeds capture limit");
 					}
 				}
-				bodyBuffer.write(body, 0, totalRead);
 			}
 			byte[] body = bodyBuffer.toByteArray();
 

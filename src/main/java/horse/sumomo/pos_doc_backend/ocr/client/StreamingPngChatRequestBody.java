@@ -118,7 +118,8 @@ class StreamingPngChatRequestBody extends RequestBody {
 		// 4. Stream the PNG file through Base64 with an 8192-byte buffer.
 		//    File read failures map to OCR_IMAGE_UNAVAILABLE.
 		//    Sink write failures propagate as IOException (transport errors).
-		//    Base64 finalization failures propagate.
+		//    Base64 finalization failures propagate, or are suppressed if
+		//    an earlier failure already exists.
 		OutputStream nonClosingSink = new NonClosingOutputStream(sink);
 		OutputStream base64Stream = Base64.getEncoder().wrap(nonClosingSink);
 		long rawByteCount = 0L;
@@ -130,6 +131,7 @@ class StreamingPngChatRequestBody extends RequestBody {
 		catch (IOException e) {
 			throw new OcrException(Code.OCR_IMAGE_UNAVAILABLE, e);
 		}
+		Throwable primaryFailure = null;
 		try (InputStream fileIn = in) {
 			// Validate the PNG signature from the first 8 raw bytes.
 			byte[] signatureBuffer = new byte[PNG_SIGNATURE.length];
@@ -175,30 +177,36 @@ class StreamingPngChatRequestBody extends RequestBody {
 				// Let it propagate; do NOT map to OCR_IMAGE_UNAVAILABLE.
 				base64Stream.write(copyBuffer, 0, bytesRead);
 			}
+
+			// At EOF, require the raw byte count to equal the expected size.
+			// This check must be inside the try block so that a failure here
+			// is tracked as the primary failure for Base64 close suppression.
+			if (rawByteCount != this.expectedPngByteSize) {
+				throw new OcrException(Code.OCR_IMAGE_INVALID);
+			}
 		}
-		catch (OcrException e) {
-			throw e;
-		}
-		catch (IOException e) {
-			// Distinguish file read failures from sink write failures.
-			// If the exception came from reading the file, it's OCR_IMAGE_UNAVAILABLE.
-			// If it came from writing to the sink, it's a transport error.
-			// Since we can't easily distinguish, and the file was already opened
-			// successfully, treat IOException here as a transport/sink failure
-			// and let it propagate. The file read is wrapped separately above.
-			throw e;
+		catch (Throwable t) {
+			primaryFailure = t;
+			throw t;
 		}
 		finally {
-			// Base64 finalization writes padding. Failure must propagate.
-			base64Stream.close();
+			// Base64 finalization writes padding. If it fails:
+			// - If there is no earlier failure, propagate the close failure.
+			// - If there is an earlier failure, add close failure as suppressed.
+			try {
+				base64Stream.close();
+			}
+			catch (IOException closeEx) {
+				if (primaryFailure != null) {
+					primaryFailure.addSuppressed(closeEx);
+				}
+				else {
+					throw closeEx;
+				}
+			}
 		}
 
-		// 5. At EOF, require the raw byte count to equal the expected size.
-		if (rawByteCount != this.expectedPngByteSize) {
-			throw new OcrException(Code.OCR_IMAGE_INVALID);
-		}
-
-		// 6. Write the JSON suffix and flush.
+		// 5. Write the JSON suffix and flush.
 		sink.write(buildJsonSuffix());
 		sink.flush();
 	}
