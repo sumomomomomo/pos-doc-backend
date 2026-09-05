@@ -868,7 +868,7 @@ class LlamaCppOcrClientTest {
 						chunkSize = Long.parseLong(sizeStr.trim(), 16);
 					}
 					catch (NumberFormatException e) {
-						break;
+						throw new IOException("Malformed chunk size: " + sizeStr);
 					}
 					if (chunkSize < 0) {
 						throw new IOException("Negative chunk size");

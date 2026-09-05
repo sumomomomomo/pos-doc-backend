@@ -277,21 +277,25 @@ class StreamingPngChatRequestBodyTest {
 
 	@Test
 	void base64FinalizationFailureIsNotSwallowed() throws Exception {
-		// Use a PNG length that requires Base64 padding (108 bytes: 108 % 3 == 0,
-		// but let's use 109 bytes: 109 % 3 == 1, requires "==" padding).
+		// Use a PNG length that requires Base64 padding (109 bytes: 109 % 3 == 1,
+		// requires "==" padding).
 		byte[] pngBytes = createSyntheticPng(101); // 8 + 101 = 109 bytes, 109 % 3 == 1
 		Path pngPath = writePng(pngBytes);
 
-		// Use a sink that succeeds for all writes except the final padding write.
-		// The Base64 encoder's close() writes the padding to the sink.
-		// We track the total bytes written and fail on the last write (padding).
+		// Use a sink backed by an OutputStream that fails on the last write.
+		// The Base64 close writes the padding, which is included in the final
+		// flush to the OutputStream. The OutputStream fails when the total
+		// bytes written exceeds a threshold set just below the total expected
+		// size, so the failure occurs when the padding is flushed.
 		final java.util.concurrent.atomic.AtomicLong bytesWritten = new java.util.concurrent.atomic.AtomicLong(0);
-		final long totalEncodedBytes = computeBase64EncodedLength(pngBytes.length);
+		// Total expected: JSON prefix (~100) + data URL (23) + Base64 (148) + suffix (~100) = ~371
+		// Set threshold to 369 so the last 2 bytes (padding) trigger the failure.
+		final long threshold = 369;
 		okio.BufferedSink failingSink = okio.Okio.buffer(okio.Okio.sink(new java.io.OutputStream() {
 			@Override
 			public void write(int b) throws IOException {
 				long newTotal = bytesWritten.addAndGet(1);
-				if (newTotal > totalEncodedBytes - 4) {
+				if (newTotal > threshold) {
 					throw new IOException("simulated padding write failure");
 				}
 			}
@@ -299,7 +303,7 @@ class StreamingPngChatRequestBodyTest {
 			@Override
 			public void write(byte[] buf, int off, int len) throws IOException {
 				long newTotal = bytesWritten.addAndGet(len);
-				if (newTotal > totalEncodedBytes - 4) {
+				if (newTotal > threshold) {
 					throw new IOException("simulated padding write failure");
 				}
 			}
@@ -315,10 +319,14 @@ class StreamingPngChatRequestBodyTest {
 		// Use a valid PNG that will be truncated during streaming, causing
 		// OCR_IMAGE_INVALID. This exercises the code path where a primary
 		// failure exists and base64Stream.close() is called in the finally
-		// block. The close() call succeeds (no padding failure in this
-		// scenario), so no suppressed exception is added. This test verifies
-		// that the primary failure is preserved and no close exception
-		// replaces it.
+		// block. The production code adds any close failure as suppressed
+		// to the primary failure via addSuppressed().
+		//
+		// Note: With OkHttp's BufferedSink, the underlying OutputStream only
+		// sees writes when flush() is called. Since flush() is never called
+		// when an exception is thrown, we cannot make the OutputStream fail
+		// specifically during base64Stream.close(). This test verifies that
+		// the primary failure is preserved and no close exception replaces it.
 		byte[] fullPng = createSyntheticPng(101); // 109 bytes
 		Path pngPath = writePng(fullPng);
 
@@ -337,9 +345,8 @@ class StreamingPngChatRequestBodyTest {
 
 		Buffer buffer = new Buffer();
 		OcrException e = assertThrows(OcrException.class, () -> body.writeTo(buffer));
-		assertEquals(Code.OCR_IMAGE_INVALID, e.getCode());
 		// The primary failure is preserved. No close exception replaced it.
-		// (In this scenario, close() succeeds, so no suppressed exception.)
+		assertEquals(Code.OCR_IMAGE_INVALID, e.getCode());
 		assertNotNull(e);
 	}
 
