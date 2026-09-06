@@ -2,6 +2,7 @@ package horse.sumomo.pos_doc_backend.ocr.client;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -282,61 +283,73 @@ class StreamingPngChatRequestBodyTest {
 		byte[] pngBytes = createSyntheticPng(101); // 8 + 101 = 109 bytes, 109 % 3 == 1
 		Path pngPath = writePng(pngBytes);
 
-		// Use a sink backed by an OutputStream that fails on the last write.
-		// The Base64 close writes the padding, which is included in the final
-		// flush to the OutputStream. The OutputStream fails when the total
-		// bytes written exceeds a threshold set just below the total expected
-		// size, so the failure occurs when the padding is flushed.
-		final java.util.concurrent.atomic.AtomicLong bytesWritten = new java.util.concurrent.atomic.AtomicLong(0);
-		// Total expected: JSON prefix (~100) + data URL (23) + Base64 (148) + suffix (~100) = ~371
-		// Set threshold to 369 so the last 2 bytes (padding) trigger the failure.
-		final long threshold = 369;
-		okio.BufferedSink failingSink = okio.Okio.buffer(okio.Okio.sink(new java.io.OutputStream() {
+		// Use a Base64OutputStreamFactory that returns a wrapper whose close()
+		// throws a known IOException. This deterministically simulates a failure
+		// during Base64 finalization (padding write).
+		final IOException closeFailure = new IOException("simulated base64 close failure");
+		StreamingPngChatRequestBody.Base64OutputStreamFactory failingFactory = out -> new java.io.OutputStream() {
 			@Override
 			public void write(int b) throws IOException {
-				long newTotal = bytesWritten.addAndGet(1);
-				if (newTotal > threshold) {
-					throw new IOException("simulated padding write failure");
-				}
+				out.write(b);
 			}
 
 			@Override
 			public void write(byte[] buf, int off, int len) throws IOException {
-				long newTotal = bytesWritten.addAndGet(len);
-				if (newTotal > threshold) {
-					throw new IOException("simulated padding write failure");
-				}
+				out.write(buf, off, len);
 			}
-		}));
 
-		StreamingPngChatRequestBody body = newBody(pngPath, pngBytes.length);
-		IOException e = assertThrows(IOException.class, () -> body.writeTo(failingSink));
-		assertTrue(e.getMessage().contains("simulated padding write failure"));
+			@Override
+			public void close() throws IOException {
+				throw closeFailure;
+			}
+		};
+
+		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
+				pngPath, pngBytes.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
+				this.objectMapper, failingFactory);
+
+		Buffer buffer = new Buffer();
+		IOException e = assertThrows(IOException.class, () -> body.writeTo(buffer));
+		assertSame(closeFailure, e);
 	}
 
 	@Test
 	void base64CloseFailureIsSuppressedWhenPrimaryFailureExists() throws Exception {
 		// Use a valid PNG that will be truncated during streaming, causing
-		// OCR_IMAGE_INVALID. This exercises the code path where a primary
-		// failure exists and base64Stream.close() is called in the finally
-		// block. The production code adds any close failure as suppressed
-		// to the primary failure via addSuppressed().
-		//
-		// Note: With OkHttp's BufferedSink, the underlying OutputStream only
-		// sees writes when flush() is called. Since flush() is never called
-		// when an exception is thrown, we cannot make the OutputStream fail
-		// specifically during base64Stream.close(). This test verifies that
-		// the primary failure is preserved and no close exception replaces it.
+		// OCR_IMAGE_INVALID. The Base64OutputStreamFactory returns a wrapper
+		// whose close() throws a known IOException. We assert that
+		// OCR_IMAGE_INVALID remains the primary exception and the close
+		// failure appears in getSuppressed().
 		byte[] fullPng = createSyntheticPng(101); // 109 bytes
 		Path pngPath = writePng(fullPng);
 
-		// Provide only 55 bytes, causing rawByteCount != expectedPngByteSize.
+		// Provide only 55 bytes (55 % 3 == 1, requires "==" padding), causing
+		// rawByteCount != expectedPngByteSize (OCR_IMAGE_INVALID).
 		byte[] truncated = new byte[55];
 		System.arraycopy(fullPng, 0, truncated, 0, truncated.length);
 
+		// The Base64 wrapper's close() throws a known IOException.
+		final IOException closeFailure = new IOException("simulated base64 close failure");
+		StreamingPngChatRequestBody.Base64OutputStreamFactory failingFactory = out -> new java.io.OutputStream() {
+			@Override
+			public void write(int b) throws IOException {
+				out.write(b);
+			}
+
+			@Override
+			public void write(byte[] buf, int off, int len) throws IOException {
+				out.write(buf, off, len);
+			}
+
+			@Override
+			public void close() throws IOException {
+				throw closeFailure;
+			}
+		};
+
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 				pngPath, fullPng.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper) {
+				this.objectMapper, failingFactory) {
 			@Override
 			InputStream openInputStream(Path path) throws IOException {
 				return new ByteArrayInputStream(truncated);
@@ -345,9 +358,12 @@ class StreamingPngChatRequestBodyTest {
 
 		Buffer buffer = new Buffer();
 		OcrException e = assertThrows(OcrException.class, () -> body.writeTo(buffer));
-		// The primary failure is preserved. No close exception replaced it.
+		// Assert OCR_IMAGE_INVALID remains the primary exception.
 		assertEquals(Code.OCR_IMAGE_INVALID, e.getCode());
-		assertNotNull(e);
+		// Assert exactly the close IOException is present in getSuppressed().
+		Throwable[] suppressed = e.getSuppressed();
+		assertEquals(1, suppressed.length, "Expected exactly one suppressed exception");
+		assertSame(closeFailure, suppressed[0]);
 	}
 
 	private static long computeBase64EncodedLength(long rawLength) {

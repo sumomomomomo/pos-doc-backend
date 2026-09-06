@@ -677,6 +677,11 @@ class LlamaCppOcrClientTest {
 
 		LlamaCppOcrClient client = createClient();
 
+		// Use the permit gate to deterministically detect when the second
+		// caller reaches the blocking permit-acquisition state.
+		final CountDownLatch secondReachedPermitGate = new CountDownLatch(1);
+		client.setPermitGate(() -> secondReachedPermitGate.countDown());
+
 		// Start the first request in a separate thread; it will hold the semaphore.
 		CountDownLatch firstDone = new CountDownLatch(1);
 		ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -697,14 +702,10 @@ class LlamaCppOcrClientTest {
 					"First request did not arrive at the server in time");
 
 			// Start a second caller that will be queued on the semaphore.
-			// Use a latch to detect when the second caller has started,
-			// and record the interrupt flag inside the thread.
-			final CountDownLatch secondStarted = new CountDownLatch(1);
 			final CountDownLatch secondDone = new CountDownLatch(1);
 			final AtomicReference<Throwable> secondError = new AtomicReference<>();
 			final AtomicBoolean interruptFlagRestored = new AtomicBoolean(false);
 			Thread secondThread = new Thread(() -> {
-				secondStarted.countDown();
 				try {
 					client.recognize(page);
 				}
@@ -719,39 +720,14 @@ class LlamaCppOcrClientTest {
 			});
 			secondThread.start();
 
-			// Wait for the second thread to start.
-			assertTrue(secondStarted.await(2, TimeUnit.SECONDS), "Second thread did not start");
-
-			// Deterministic evidence that the second caller is queued on the semaphore:
-			// The server has only seen one request so far (the first one is blocked
-			// on releaseFirstRequest). If the second caller were not blocked on the
-			// semaphore, it would have made a second HTTP request to the server.
-			// We verify this by checking that the server has not recorded a second
-			// request. We use a bounded wait to allow the second caller to reach
-			// the semaphore acquire.
-			// Since we can't use Thread.sleep, we use a short bounded wait on a
-			// latch that will never fire (as a timeout mechanism).
-			CountDownLatch queueEvidence = new CountDownLatch(1);
-			executor.submit(() -> {
-				// Wait a short time for the second caller to reach the semaphore.
-				// We can't use Thread.sleep, so we use a latch with a timeout.
-				try {
-					// This latch will never be counted down; we use the timeout
-					// as a bounded wait.
-					queueEvidence.await(100, TimeUnit.MILLISECONDS);
-				}
-				catch (InterruptedException ignored) {
-					Thread.currentThread().interrupt();
-				}
-			});
-			// The above submit is just to get a bounded wait without Thread.sleep.
-			// Actually, let's just use a simple bounded wait on a latch.
-			// We'll use the secondDone latch with a very short timeout to check
-			// if the second caller has already completed (it shouldn't have).
-			assertFalse(secondDone.await(50, TimeUnit.MILLISECONDS),
-					"Second caller completed too quickly; not blocked on semaphore");
+			// Wait for the second caller to reach the blocking permit-acquisition
+			// state. This is deterministic: the permit gate fires immediately
+			// before semaphore.acquire() blocks.
+			assertTrue(secondReachedPermitGate.await(5, TimeUnit.SECONDS),
+					"Second caller did not reach the permit gate in time");
 
 			// The server should have seen exactly 1 request (the first one).
+			// The second caller is blocked on the semaphore, not the server.
 			assertEquals(1, this.recordedRequests.size(),
 					"Expected exactly 1 request at the server, but got " + this.recordedRequests.size());
 
@@ -770,6 +746,10 @@ class LlamaCppOcrClientTest {
 			assertTrue(interruptFlagRestored.get(),
 					"Interrupt flag was not restored after OCR_INTERRUPTED");
 
+			// Assert the second HTTP request was never sent.
+			assertEquals(1, this.recordedRequests.size(),
+					"Second HTTP request should not have been sent");
+
 			// Release the first request.
 			this.releaseFirstRequest.countDown();
 			assertTrue(firstDone.await(10, TimeUnit.SECONDS), "First request did not complete");
@@ -779,6 +759,7 @@ class LlamaCppOcrClientTest {
 			assertNotNull(result);
 		}
 		finally {
+			client.setPermitGate(null);
 			executor.shutdownNow();
 		}
 	}
@@ -855,6 +836,7 @@ class LlamaCppOcrClientTest {
 			long totalCaptured = 0;
 			final int COPY_BUF_SIZE = 8192;
 			final byte[] copyBuf = new byte[COPY_BUF_SIZE];
+			boolean bodyCaptureFailed = false;
 			if (transferEncoding != null && transferEncoding.toLowerCase().contains("chunked")) {
 				while (true) {
 					String sizeLine = readLine(in);
@@ -868,17 +850,20 @@ class LlamaCppOcrClientTest {
 						chunkSize = Long.parseLong(sizeStr.trim(), 16);
 					}
 					catch (NumberFormatException e) {
-						throw new IOException("Malformed chunk size: " + sizeStr);
+						bodyCaptureFailed = true;
+						break;
 					}
 					if (chunkSize < 0) {
-						throw new IOException("Negative chunk size");
+						bodyCaptureFailed = true;
+						break;
 					}
 					if (chunkSize == 0) {
 						readLine(in);
 						break;
 					}
 					if (chunkSize > MAX_CAPTURE_BYTES - totalCaptured) {
-						throw new IOException("Chunk size exceeds remaining capture allowance");
+						bodyCaptureFailed = true;
+						break;
 					}
 					long remaining = chunkSize;
 					while (remaining > 0) {
@@ -891,8 +876,12 @@ class LlamaCppOcrClientTest {
 						totalCaptured += n;
 						remaining -= n;
 						if (totalCaptured > MAX_CAPTURE_BYTES) {
-							throw new IOException("Request body exceeds capture limit");
+							bodyCaptureFailed = true;
+							break;
 						}
+					}
+					if (bodyCaptureFailed) {
+						break;
 					}
 					readLine(in);
 				}
@@ -901,11 +890,15 @@ class LlamaCppOcrClientTest {
 				String contentLengthStr = headers.get("content-length");
 				long contentLength = contentLengthStr != null ? Long.parseLong(contentLengthStr) : 0;
 				if (contentLength < 0) {
-					throw new IOException("Negative content length");
+					bodyCaptureFailed = true;
 				}
 				if (contentLength > MAX_CAPTURE_BYTES) {
-					throw new IOException("Content length exceeds capture limit");
+					bodyCaptureFailed = true;
 				}
+				if (bodyCaptureFailed) {
+					// Skip body reading; the error response will be sent below.
+				}
+				else {
 				long remaining = contentLength;
 				while (remaining > 0) {
 					int toRead = (int) Math.min(remaining, COPY_BUF_SIZE);
@@ -917,9 +910,23 @@ class LlamaCppOcrClientTest {
 					totalCaptured += n;
 					remaining -= n;
 					if (totalCaptured > MAX_CAPTURE_BYTES) {
-						throw new IOException("Request body exceeds capture limit");
+						bodyCaptureFailed = true;
+						break;
 					}
 				}
+				}
+			}
+			if (bodyCaptureFailed) {
+				// Send a 500 error response and close the connection.
+				String errorResponse = "HTTP/1.1 500 Internal Server Error\r\n"
+						+ "Content-Type: application/json\r\n"
+						+ "Content-Length: 2\r\n"
+						+ "Connection: close\r\n"
+						+ "\r\n"
+						+ "{}";
+				out.write(errorResponse.getBytes(StandardCharsets.UTF_8));
+				out.flush();
+				return;
 			}
 			byte[] body = bodyBuffer.toByteArray();
 
@@ -960,7 +967,7 @@ class LlamaCppOcrClientTest {
 			this.concurrentRequests.decrementAndGet();
 		}
 		catch (IOException e) {
-			// Connection closed or capture limit exceeded; ignore.
+			// Connection closed or other I/O error; ignore.
 		}
 	}
 
@@ -1076,6 +1083,193 @@ class LlamaCppOcrClientTest {
 			this.body = body;
 			this.contentType = headers.getOrDefault("content-type", "");
 			this.accept = headers.getOrDefault("accept", "");
+		}
+	}
+
+	@Test
+	void rejectsContentLengthAboveCaptureLimit() throws Exception {
+		// Send a request with a Content-Length above the capture limit.
+		// The server should reject it before reading the body.
+		this.firstRequestArrived = new CountDownLatch(1);
+		this.releaseFirstRequest = new CountDownLatch(1);
+
+		// Use a raw socket to send a request with a large Content-Length.
+		// The server checks the Content-Length before reading the body, so
+		// it should reject the request immediately without waiting for the
+		// body data.
+		try (java.net.Socket socket = new java.net.Socket("127.0.0.1", this.port)) {
+			socket.setSoTimeout(5000);
+			java.io.OutputStream out = socket.getOutputStream();
+			java.io.InputStream in = socket.getInputStream();
+
+			// Send a request with a Content-Length above MAX_CAPTURE_BYTES.
+			long largeLength = MAX_CAPTURE_BYTES + 1;
+			String request = "POST /v1/chat/completions HTTP/1.1\r\n"
+					+ "Host: 127.0.0.1:" + this.port + "\r\n"
+					+ "Content-Type: application/json\r\n"
+					+ "Content-Length: " + largeLength + "\r\n"
+					+ "Connection: close\r\n"
+					+ "\r\n";
+			out.write(request.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			out.flush();
+
+			// Read the response. The server should reject the request
+			// immediately because the Content-Length exceeds the limit.
+			java.io.BufferedReader reader = new java.io.BufferedReader(
+					new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+			String statusLine = reader.readLine();
+			assertNotNull(statusLine);
+			// The server should return a 500 error.
+			assertTrue(statusLine.contains("500"), "Expected 500 error but got: " + statusLine);
+		}
+	}
+
+	@Test
+	void rejectsChunkSizeAboveRemainingCaptureCapacity() throws Exception {
+		// Send a chunked request where a chunk size exceeds the remaining
+		// capture capacity. The server should reject it.
+		this.firstRequestArrived = new CountDownLatch(1);
+		this.releaseFirstRequest = new CountDownLatch(1);
+
+		// Use a raw socket to send a chunked request with a large chunk.
+		try (java.net.Socket socket = new java.net.Socket("127.0.0.1", this.port)) {
+			socket.setSoTimeout(5000);
+			java.io.OutputStream out = socket.getOutputStream();
+			java.io.InputStream in = socket.getInputStream();
+
+			// Send a request with a chunk size above MAX_CAPTURE_BYTES.
+			String largeChunkSize = Long.toHexString(MAX_CAPTURE_BYTES + 1);
+			String request = "POST /v1/chat/completions HTTP/1.1\r\n"
+					+ "Host: 127.0.0.1:" + this.port + "\r\n"
+					+ "Content-Type: application/json\r\n"
+					+ "Transfer-Encoding: chunked\r\n"
+					+ "Connection: close\r\n"
+					+ "\r\n"
+					+ largeChunkSize + "\r\n"
+					+ "data\r\n"
+					+ "0\r\n"
+					+ "\r\n";
+			out.write(request.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			out.flush();
+
+			// Read the response.
+			java.io.BufferedReader reader = new java.io.BufferedReader(
+					new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+			String statusLine = reader.readLine();
+			assertNotNull(statusLine);
+			// The server should return a 500 error.
+			assertTrue(statusLine.contains("500"), "Expected 500 error but got: " + statusLine);
+		}
+	}
+
+	@Test
+	void rejectsMalformedChunkSyntax() throws Exception {
+		// Send a chunked request with malformed chunk syntax.
+		// The server should reject it with an IOException.
+		this.firstRequestArrived = new CountDownLatch(1);
+		this.releaseFirstRequest = new CountDownLatch(1);
+
+		// Use a raw socket to send malformed chunk syntax.
+		try (java.net.Socket socket = new java.net.Socket("127.0.0.1", this.port)) {
+			socket.setSoTimeout(5000);
+			java.io.OutputStream out = socket.getOutputStream();
+			java.io.InputStream in = socket.getInputStream();
+
+			// Send a request with malformed chunk size.
+			String request = "POST /v1/chat/completions HTTP/1.1\r\n"
+					+ "Host: 127.0.0.1:" + this.port + "\r\n"
+					+ "Content-Type: application/json\r\n"
+					+ "Transfer-Encoding: chunked\r\n"
+					+ "Connection: close\r\n"
+					+ "\r\n"
+					+ "notahexnumber\r\n"
+					+ "data\r\n"
+					+ "0\r\n"
+					+ "\r\n";
+			out.write(request.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			out.flush();
+
+			// Read the response.
+			java.io.BufferedReader reader = new java.io.BufferedReader(
+					new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+			String statusLine = reader.readLine();
+			assertNotNull(statusLine);
+			// The server should return a 500 error.
+			assertTrue(statusLine.contains("500"), "Expected 500 error but got: " + statusLine);
+		}
+	}
+
+	@Test
+	void rejectsNegativeChunkSize() throws Exception {
+		// Send a chunked request with a negative chunk size.
+		// The server should reject it.
+		this.firstRequestArrived = new CountDownLatch(1);
+		this.releaseFirstRequest = new CountDownLatch(1);
+
+		// Use a raw socket to send a negative chunk size.
+		try (java.net.Socket socket = new java.net.Socket("127.0.0.1", this.port)) {
+			socket.setSoTimeout(5000);
+			java.io.OutputStream out = socket.getOutputStream();
+			java.io.InputStream in = socket.getInputStream();
+
+			// Send a request with a negative chunk size (0xFFFFFFFF in hex = -1 as int).
+			String request = "POST /v1/chat/completions HTTP/1.1\r\n"
+					+ "Host: 127.0.0.1:" + this.port + "\r\n"
+					+ "Content-Type: application/json\r\n"
+					+ "Transfer-Encoding: chunked\r\n"
+					+ "Connection: close\r\n"
+					+ "\r\n"
+					+ "ffffffff\r\n"
+					+ "data\r\n"
+					+ "0\r\n"
+					+ "\r\n";
+			out.write(request.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			out.flush();
+
+			// Read the response.
+			java.io.BufferedReader reader = new java.io.BufferedReader(
+					new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+			String statusLine = reader.readLine();
+			assertNotNull(statusLine);
+			// The server should return a 500 error.
+			assertTrue(statusLine.contains("500"), "Expected 500 error but got: " + statusLine);
+		}
+	}
+
+	@Test
+	void rejectsOverflowingHexChunkSize() throws Exception {
+		// Send a chunked request with an overflowing hex chunk size.
+		// The server should reject it.
+		this.firstRequestArrived = new CountDownLatch(1);
+		this.releaseFirstRequest = new CountDownLatch(1);
+
+		// Use a raw socket to send an overflowing chunk size.
+		try (java.net.Socket socket = new java.net.Socket("127.0.0.1", this.port)) {
+			socket.setSoTimeout(5000);
+			java.io.OutputStream out = socket.getOutputStream();
+			java.io.InputStream in = socket.getInputStream();
+
+			// Send a request with a chunk size that overflows long.
+			String request = "POST /v1/chat/completions HTTP/1.1\r\n"
+					+ "Host: 127.0.0.1:" + this.port + "\r\n"
+					+ "Content-Type: application/json\r\n"
+					+ "Transfer-Encoding: chunked\r\n"
+					+ "Connection: close\r\n"
+					+ "\r\n"
+					+ "ffffffffffffffffffff\r\n"
+					+ "data\r\n"
+					+ "0\r\n"
+					+ "\r\n";
+			out.write(request.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			out.flush();
+
+			// Read the response.
+			java.io.BufferedReader reader = new java.io.BufferedReader(
+					new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+			String statusLine = reader.readLine();
+			assertNotNull(statusLine);
+			// The server should return a 500 error.
+			assertTrue(statusLine.contains("500"), "Expected 500 error but got: " + statusLine);
 		}
 	}
 

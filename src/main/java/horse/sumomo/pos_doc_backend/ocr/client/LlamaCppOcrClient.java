@@ -48,12 +48,22 @@ public final class LlamaCppOcrClient {
 	private final LlamaCppOcrProperties properties;
 	private final ObjectMapper objectMapper;
 	private final Semaphore semaphore;
+	private volatile Runnable permitGate;
 
 	public LlamaCppOcrClient(OkHttpClient httpClient, LlamaCppOcrProperties properties) {
 		this.httpClient = httpClient;
 		this.properties = properties;
 		this.objectMapper = new ObjectMapper();
 		this.semaphore = new Semaphore(properties.maxConcurrentRequests(), true);
+	}
+
+	/**
+	 * Package-private seam for tests to observe when a request has reached
+	 * the blocking permit-acquisition state. The provided {@link Runnable}
+	 * is called immediately before {@code semaphore.acquire()} blocks.
+	 */
+	void setPermitGate(Runnable gate) {
+		this.permitGate = gate;
 	}
 
 	/**
@@ -72,6 +82,10 @@ public final class LlamaCppOcrClient {
 		boolean acquired = false;
 		try {
 			try {
+				Runnable gate = this.permitGate;
+				if (gate != null) {
+					gate.run();
+				}
 				this.semaphore.acquire();
 				acquired = true;
 			}

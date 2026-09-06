@@ -50,9 +50,17 @@ class StreamingPngChatRequestBody extends RequestBody {
 	private final double temperature;
 	private final double topP;
 	private final ObjectMapper objectMapper;
+	private final Base64OutputStreamFactory base64Factory;
 
 	StreamingPngChatRequestBody(Path pngPath, long expectedPngByteSize, long maxImageBytes, String model,
 			String prompt, int maxTokens, double temperature, double topP, ObjectMapper objectMapper) {
+		this(pngPath, expectedPngByteSize, maxImageBytes, model, prompt, maxTokens, temperature, topP,
+				objectMapper, StreamingPngChatRequestBody::defaultBase64Wrap);
+	}
+
+	StreamingPngChatRequestBody(Path pngPath, long expectedPngByteSize, long maxImageBytes, String model,
+			String prompt, int maxTokens, double temperature, double topP, ObjectMapper objectMapper,
+			Base64OutputStreamFactory base64Factory) {
 		if (pngPath == null) {
 			throw new IllegalArgumentException("pngPath must not be null");
 		}
@@ -77,6 +85,21 @@ class StreamingPngChatRequestBody extends RequestBody {
 		this.temperature = temperature;
 		this.topP = topP;
 		this.objectMapper = objectMapper;
+		this.base64Factory = base64Factory;
+	}
+
+	/**
+		* Package-private functional interface for creating a Base64-wrapped
+		* output stream. Production uses {@link Base64#getEncoder()}; tests can
+		* supply a wrapper whose {@code close()} throws to verify that close
+		* failures are propagated or suppressed.
+		*/
+	interface Base64OutputStreamFactory {
+		OutputStream wrap(OutputStream out) throws IOException;
+	}
+
+	private static OutputStream defaultBase64Wrap(OutputStream out) {
+		return Base64.getEncoder().wrap(out);
 	}
 
 	@Override
@@ -121,7 +144,7 @@ class StreamingPngChatRequestBody extends RequestBody {
 		//    Base64 finalization failures propagate, or are suppressed if
 		//    an earlier failure already exists.
 		OutputStream nonClosingSink = new NonClosingOutputStream(sink);
-		OutputStream base64Stream = Base64.getEncoder().wrap(nonClosingSink);
+		OutputStream base64Stream = this.base64Factory.wrap(nonClosingSink);
 		long rawByteCount = 0L;
 		byte[] copyBuffer = new byte[COPY_BUFFER_SIZE];
 		InputStream in;
