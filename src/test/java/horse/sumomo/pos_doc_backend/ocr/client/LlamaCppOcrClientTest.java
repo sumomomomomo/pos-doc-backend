@@ -677,12 +677,9 @@ class LlamaCppOcrClientTest {
 
 		LlamaCppOcrClient client = createClient();
 
-		// Use the permit gate to deterministically detect when the second
-		// caller reaches the blocking permit-acquisition state.
-		final CountDownLatch secondReachedPermitGate = new CountDownLatch(1);
-		client.setPermitGate(() -> secondReachedPermitGate.countDown());
-
 		// Start the first request in a separate thread; it will hold the semaphore.
+		// No permit gate is installed yet, so the first request will not
+		// trigger the gate.
 		CountDownLatch firstDone = new CountDownLatch(1);
 		ExecutorService executor = Executors.newFixedThreadPool(2);
 		try {
@@ -698,8 +695,15 @@ class LlamaCppOcrClientTest {
 			});
 
 			// Wait for the first request to arrive at the server (holding the semaphore).
+			// This proves the first request acquired and still holds the permit.
 			assertTrue(this.firstRequestArrived.await(5, TimeUnit.SECONDS),
 					"First request did not arrive at the server in time");
+
+			// Now install the permit gate. Since the first request already
+			// holds the permit, any subsequent call to the gate proves that
+			// a new request is about to block on the unavailable permit.
+			final CountDownLatch secondReachedPermitGate = new CountDownLatch(1);
+			client.setPermitGate(() -> secondReachedPermitGate.countDown());
 
 			// Start a second caller that will be queued on the semaphore.
 			final CountDownLatch secondDone = new CountDownLatch(1);
@@ -1212,14 +1216,16 @@ class LlamaCppOcrClientTest {
 			java.io.OutputStream out = socket.getOutputStream();
 			java.io.InputStream in = socket.getInputStream();
 
-			// Send a request with a negative chunk size (0xFFFFFFFF in hex = -1 as int).
+			// Send a request with a negative chunk size (-1 in hex).
+			// Long.parseLong("-1", 16) returns -1, exercising the
+			// chunkSize < 0 rejection branch.
 			String request = "POST /v1/chat/completions HTTP/1.1\r\n"
 					+ "Host: 127.0.0.1:" + this.port + "\r\n"
 					+ "Content-Type: application/json\r\n"
 					+ "Transfer-Encoding: chunked\r\n"
 					+ "Connection: close\r\n"
 					+ "\r\n"
-					+ "ffffffff\r\n"
+					+ "-1\r\n"
 					+ "data\r\n"
 					+ "0\r\n"
 					+ "\r\n";
