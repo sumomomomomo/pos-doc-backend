@@ -527,12 +527,13 @@ echo "== main queue and DLQ are empty =="
 for Q in pos.ingestion.jobs pos.ingestion.jobs.dlq; do
     i=0
     while [ $i -lt 30 ]; do
-        READY="$(curl --silent --show-error \
+        QUEUE_INFO="$(curl --silent --show-error \
             --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
-            http://127.0.0.1:15672/api/queues/%2F/${Q} \
-            | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p' 2>/dev/null)"
-        # Empty or 404 means the queue is absent or has no ready messages.
-        if [ -z "${READY}" ] || [ "${READY}" = "0" ]; then
+            http://127.0.0.1:15672/api/queues/%2F/${Q} 2>/dev/null)"
+        READY="$(printf '%s' "${QUEUE_INFO}" | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p')"
+        UNACKED="$(printf '%s' "${QUEUE_INFO}" | sed -n 's/.*"messages_unacknowledged":\([0-9]\{1,\}\).*/\1/p')"
+        # Empty or 404 means the queue is absent or has no messages.
+        if [ -z "${READY}" ] || { [ "${READY}" = "0" ] && [ "${UNACKED}" = "0" ]; }; then
             break
         fi
         i=$((i + 1))
@@ -540,6 +541,10 @@ for Q in pos.ingestion.jobs pos.ingestion.jobs.dlq; do
     done
     if [ -n "${READY}" ] && [ "${READY}" != "0" ]; then
         echo "ERROR: ${Q} has ${READY} ready messages, expected 0." >&2
+        exit 1
+    fi
+    if [ -n "${UNACKED}" ] && [ "${UNACKED}" != "0" ]; then
+        echo "ERROR: ${Q} has ${UNACKED} unacknowledged messages, expected 0." >&2
         exit 1
     fi
 done
@@ -635,22 +640,25 @@ curl --fail --silent --show-error --request POST \
     -H 'content-type: application/json' \
     -d "${PUBLISH_BODY}" \
     "http://127.0.0.1:15672/api/exchanges/%2F/pos.ingestion/publish" >/dev/null
-# Bounded wait for the consumer to ACK the duplicate.
+# Bounded wait for the consumer to fully ACK the duplicate.
+# Poll until both messages_ready AND messages_unacknowledged are zero.
 i=0
 READY="1"
+UNACKED="1"
 while [ "${i}" -lt 30 ]; do
-    READY="$(curl --fail --silent --show-error \
+    QUEUE_INFO="$(curl --fail --silent --show-error \
         --user "${RABBITMQ_USERNAME}:${RABBITMQ_PASSWORD}" \
-        http://127.0.0.1:15672/api/queues/%2F/pos.ingestion.jobs \
-        | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p')"
-    if [ "${READY}" = "0" ]; then
+        http://127.0.0.1:15672/api/queues/%2F/pos.ingestion.jobs)"
+    READY="$(printf '%s' "${QUEUE_INFO}" | sed -n 's/.*"messages_ready":\([0-9]\{1,\}\).*/\1/p')"
+    UNACKED="$(printf '%s' "${QUEUE_INFO}" | sed -n 's/.*"messages_unacknowledged":\([0-9]\{1,\}\).*/\1/p')"
+    if [ "${READY}" = "0" ] && [ "${UNACKED}" = "0" ]; then
         break
     fi
     i=$((i + 1))
     sleep 1
 done
-if [ "${READY}" != "0" ]; then
-    echo "ERROR: duplicate message was not consumed (ready=${READY})." >&2
+if [ "${READY}" != "0" ] || [ "${UNACKED}" != "0" ]; then
+    echo "ERROR: duplicate message was not fully consumed (ready=${READY}, unacked=${UNACKED})." >&2
     exit 1
 fi
 # Still exactly two documents.

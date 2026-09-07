@@ -324,42 +324,47 @@ class DocumentOcrEndToEndIntegrationTest {
 	}
 
 	/**
-	 * Returns both the ready and unacknowledged message counts for a queue.
-	 * Index 0 = ready, index 1 = unacknowledged.
-	 *
-	 * <p>Uses the RabbitMQ AMQP channel's {@code queueDeclarePassive} for
-	 * the ready count and the RabbitMQ management API for the
-	 * unacknowledged count.
+	 * Returns both the ready and unacknowledged message counts for a queue
+	 * using the RabbitMQ management HTTP API.
+	 * Index 0 = messages_ready, index 1 = messages_unacknowledged.
 	 */
 	private static long[] queueReadyAndUnacked(RabbitTemplate template, String queue) {
 		try {
-			com.rabbitmq.client.Connection conn = template.getConnectionFactory().createConnection().getDelegate();
-			com.rabbitmq.client.Channel ch = conn.createChannel();
-			com.rabbitmq.client.AMQP.Queue.DeclareOk props = ch.queueDeclarePassive(queue);
-			long ready = props.getMessageCount();
-			ch.close();
-			conn.close();
-
-			// Get unacknowledged count from the RabbitMQ management API.
-			// The management API is available on port 15672 by default.
-			// We use the AMQP connection's host and the standard management
-			// port to query the queue info.
-			var factory = template.getConnectionFactory();
-			String host = factory.getHost();
-			int port = factory.getPort();
-			// The management port is typically 15672; derive from the
-			// connection factory's configured port if available.
-			// For test containers, the management port is mapped.
-			// Use the RabbitAdmin which knows the management port.
-			org.springframework.amqp.rabbit.core.RabbitAdmin admin =
-					new org.springframework.amqp.rabbit.core.RabbitAdmin(factory);
-			var queueInfo = admin.getQueueInfo(queue);
-			long unacked = (queueInfo != null) ? queueInfo.getMessageCount() - ready : 0;
-			return new long[] { ready, Math.max(0, unacked) };
+			int mgmtPort = rabbit.getMappedPort(15672);
+			java.net.URL url = new java.net.URL(
+					"http://" + rabbit.getHost() + ":" + mgmtPort + "/api/queues/%2F/" + java.net.URLEncoder.encode(queue, java.nio.charset.StandardCharsets.UTF_8));
+			java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+			conn.setRequestMethod("GET");
+			conn.setRequestProperty("Authorization",
+					"Basic " + java.util.Base64.getEncoder().encodeToString(
+							(rabbit.getAdminUsername() + ":" + rabbit.getAdminPassword()).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+			if (conn.getResponseCode() != 200) {
+				throw new AssertionError("Management API returned " + conn.getResponseCode());
+			}
+			String body = new String(conn.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+			long ready = parseJsonLong(body, "messages_ready");
+			long unacked = parseJsonLong(body, "messages_unacknowledged");
+			return new long[] { ready, unacked };
+		}
+		catch (AssertionError e) {
+			throw e;
 		}
 		catch (Exception e) {
 			throw new AssertionError("queue ready/unacked check failed", e);
 		}
+	}
+
+	private static long parseJsonLong(String json, String key) {
+		int idx = json.indexOf("\"" + key + "\"");
+		if (idx < 0) {
+			return 0;
+		}
+		int colonIdx = json.indexOf(':', idx);
+		int endIdx = colonIdx + 1;
+		while (endIdx < json.length() && (Character.isDigit(json.charAt(endIdx)) || json.charAt(endIdx) == ' ')) {
+			endIdx++;
+		}
+		return Long.parseLong(json.substring(colonIdx + 1, endIdx).trim());
 	}
 
 	private static String sha256Hex(byte[] bytes) throws Exception {
