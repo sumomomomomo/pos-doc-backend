@@ -497,12 +497,20 @@ case "${DOCS_RESPONSE}" in
         exit 1 ;;
 esac
 
+# Use a test-only SQLite CLI container attached read-only to the SQLite
+# volume, since the backend runtime image contains the JRE and curl but
+# not the sqlite3 CLI.
+sqlite_query() {
+    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+        -v "${STACK_ID}_sqlite-data:/db:ro" \
+        alpine:3.20 sh -c "apk add --no-cache sqlite >/dev/null 2>&1; sqlite3 /db/pos-doc.db \"$1\""
+}
+
 echo "== pos_record is REVIEW_REQUIRED (Task 9) =="
 # After Task 9, the POS record must be REVIEW_REQUIRED (durable OCR exists
 # but structured policy metadata has not yet been extracted). We verify
-# via sqlite3 query.
-RECORD_STATUS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';\" 2>/dev/null || echo UNKNOWN")"
+# via the test-only SQLite CLI container.
+RECORD_STATUS="$(sqlite_query "SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
 if [ "${RECORD_STATUS}" = "REVIEW_REQUIRED" ]; then
     echo "pos_record: REVIEW_REQUIRED"
 else
@@ -655,16 +663,16 @@ if [ "${COUNT_AFTER}" != "2" ]; then
 fi
 echo "duplicate: ACK'd as no-op; document count unchanged"
 
-# --- Task 9: OCR verification -------------------------------------------------
+# Verify the OCR request count remains 2 after duplicate delivery.
+OCR_REQUEST_COUNT_AFTER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c 'curl --silent --show-error --request POST --header "Content-Type: application/json" --data "{\"method\":\"POST\",\"url\":\"/v1/chat/completions\"}" http://ocr-stub:8080/__admin/requests/count 2>/dev/null | grep -o "\"count\":[0-9]*" | grep -o "[0-9]*" || echo 0')"
+if [ "${OCR_REQUEST_COUNT_AFTER}" != "2" ]; then
+    echo "ERROR: expected 2 OCR requests after duplicate delivery, got ${OCR_REQUEST_COUNT_AFTER}." >&2
+    exit 1
+fi
+echo "wiremock: still exactly 2 OCR requests after duplicate delivery"
 
-# Use a test-only SQLite CLI container attached read-only to the SQLite
-# volume, since the backend runtime image contains the JRE and curl but
-# not the sqlite3 CLI.
-sqlite_query() {
-    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
-        -v "${STACK_ID}_sqlite-data:/db:ro" \
-        alpine:3.20 sh -c "apk add --no-cache sqlite >/dev/null 2>&1; sqlite3 /db/pos-doc.db \"$1\""
-}
+# --- Task 9: OCR verification -------------------------------------------------
 
 echo "== OCR stub health check (WireMock) =="
 # WireMock documents GET /__admin/mappings as a way to confirm the
@@ -678,11 +686,12 @@ if [ "${OCR_STUB_HTTP_CODE}" != "200" ]; then
 fi
 echo "ocr-stub: WireMock healthy (HTTP 200 from /__admin/mappings)"
 
-echo "== OCR request count via WireMock journal =="
-# Query WireMock's request journal to verify exactly two OCR calls
-# after the initial two-PDF ingestion.
+echo "== OCR request count via WireMock request-count endpoint =="
+# Use WireMock's POST /__admin/requests/count endpoint to get the exact
+# number of matching requests. This is more reliable than parsing the
+# request journal JSON, which may return all requests on a single line.
 OCR_REQUEST_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --show-error http://ocr-stub:8080/__admin/requests 2>/dev/null | grep -c "chat/completions" || echo 0')"
+    sh -c 'curl --silent --show-error --request POST --header "Content-Type: application/json" --data "{\"method\":\"POST\",\"url\":\"/v1/chat/completions\"}" http://ocr-stub:8080/__admin/requests/count 2>/dev/null | grep -o "\"count\":[0-9]*" | grep -o "[0-9]*" || echo 0')"
 if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
     echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
     exit 1
