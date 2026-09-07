@@ -72,7 +72,6 @@ class DocumentOcrWorkflowServiceTest {
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.READY_FOR_OCR);
 		when(this.ocrService.recognize(doc1Id)).thenReturn(createOcrResult(doc1Id));
 		when(this.ocrService.recognize(doc2Id)).thenReturn(createOcrResult(doc2Id));
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 
@@ -104,7 +103,6 @@ class DocumentOcrWorkflowServiceTest {
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.READY_FOR_OCR);
 		when(this.ocrService.recognize(doc1Id)).thenReturn(createOcrResult(doc1Id));
 		when(this.ocrService.recognize(doc2Id)).thenReturn(createOcrResult(doc2Id));
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 
@@ -123,7 +121,6 @@ class DocumentOcrWorkflowServiceTest {
 		when(this.persistenceService.loadDocumentsInSequenceOrder(posRecordId)).thenReturn(List.of(doc1));
 		when(this.persistenceService.inspectAndPrepare(doc1Id, 1))
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.ALREADY_COMPLETED);
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 
@@ -144,7 +141,6 @@ class DocumentOcrWorkflowServiceTest {
 		when(this.persistenceService.inspectAndPrepare(doc1Id, 1))
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.READY_FOR_OCR);
 		when(this.ocrService.recognize(doc1Id)).thenReturn(createOcrResult(doc1Id));
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 
@@ -188,7 +184,6 @@ class DocumentOcrWorkflowServiceTest {
 					"OCR must be invoked with no active transaction");
 			return createOcrResult(doc1Id);
 		});
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 	}
@@ -205,7 +200,6 @@ class DocumentOcrWorkflowServiceTest {
 		when(this.persistenceService.inspectAndPrepare(doc1Id, 1))
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.READY_FOR_OCR);
 		when(this.ocrService.recognize(doc1Id)).thenReturn(createOcrResult(doc1Id));
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 
@@ -258,7 +252,6 @@ class DocumentOcrWorkflowServiceTest {
 		when(this.persistenceService.inspectAndPrepare(doc1Id, 1))
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.READY_FOR_OCR);
 		when(this.ocrService.recognize(doc1Id)).thenReturn(createOcrResult(doc1Id));
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 
@@ -278,7 +271,6 @@ class DocumentOcrWorkflowServiceTest {
 		// meaning a result exists but the status was not COMPLETED.
 		when(this.persistenceService.inspectAndPrepare(doc1Id, 1))
 				.thenReturn(DocumentOcrPersistenceService.DocumentOcrState.STATUS_REPAIRED_COMPLETED);
-		when(this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, 1)).thenReturn(true);
 
 		this.workflowService.runOcrWorkflow(posRecordId, jobId);
 

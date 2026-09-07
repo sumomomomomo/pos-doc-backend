@@ -104,7 +104,7 @@ class DocumentOcrResultPersistenceIntegrationTest {
 		// Insert the first result via raw SQL to avoid JPA's merge behavior.
 		this.jdbc.update(
 				"INSERT INTO document_ocr_result (document_id, prompt_version, ocr_text, model, "
-						+ "finish_reason, character_count, completed_at_epoch_ms) VALUES (?,?,?,?,?,?,?)",
+						+ "finish_reason, character_count, completed_at) VALUES (?,?,?,?,?,?,?)",
 				documentId.toString(), 1, OCR_TEXT, MODEL, FINISH_REASON, OCR_TEXT.length(), now.toEpochMilli());
 
 		// A second insert with the same (document_id, prompt_version) must be
@@ -112,7 +112,7 @@ class DocumentOcrResultPersistenceIntegrationTest {
 		assertThrows(Exception.class, () ->
 				this.jdbc.update(
 						"INSERT INTO document_ocr_result (document_id, prompt_version, ocr_text, model, "
-								+ "finish_reason, character_count, completed_at_epoch_ms) VALUES (?,?,?,?,?,?,?)",
+								+ "finish_reason, character_count, completed_at) VALUES (?,?,?,?,?,?,?)",
 						documentId.toString(), 1, "different text", MODEL, FINISH_REASON, "different text".length(),
 						now.toEpochMilli()));
 	}
@@ -173,7 +173,7 @@ class DocumentOcrResultPersistenceIntegrationTest {
 		assertThrows(Exception.class, () ->
 				this.jdbc.update(
 						"INSERT INTO document_ocr_result (document_id, prompt_version, ocr_text, model, "
-								+ "finish_reason, character_count, completed_at_epoch_ms) VALUES (?,?,?,?,?,?,?)",
+								+ "finish_reason, character_count, completed_at) VALUES (?,?,?,?,?,?,?)",
 						documentId.toString(), 1, OCR_TEXT, MODEL, FINISH_REASON, 999999, now.toEpochMilli()));
 	}
 
@@ -189,7 +189,7 @@ class DocumentOcrResultPersistenceIntegrationTest {
 		assertThrows(Exception.class, () ->
 				this.jdbc.update(
 						"INSERT INTO document_ocr_result (document_id, prompt_version, ocr_text, model, "
-								+ "finish_reason, character_count, completed_at_epoch_ms) VALUES (?,?,?,?,?,?,?)",
+								+ "finish_reason, character_count, completed_at) VALUES (?,?,?,?,?,?,?)",
 						nonexistentDocumentId.toString(), 1, OCR_TEXT, MODEL, FINISH_REASON, OCR_TEXT.length(),
 						now.toEpochMilli()));
 	}

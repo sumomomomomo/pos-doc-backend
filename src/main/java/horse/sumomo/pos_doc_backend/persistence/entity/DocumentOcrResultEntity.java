@@ -46,7 +46,7 @@ public class DocumentOcrResultEntity {
 	@Column(name = "character_count", nullable = false)
 	private int characterCount;
 
-	@Column(name = "completed_at_epoch_ms", nullable = false)
+	@Column(name = "completed_at", nullable = false)
 	private Instant completedAt;
 
 	@ManyToOne(fetch = FetchType.LAZY)

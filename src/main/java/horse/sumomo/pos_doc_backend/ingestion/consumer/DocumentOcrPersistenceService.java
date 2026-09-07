@@ -119,10 +119,16 @@ public class DocumentOcrPersistenceService {
 	/**
 	 * Persists the OCR result and marks the document {@code COMPLETED} in
 	 * a new short transaction. If another result for the same key already
-	 * exists, compares only safe metadata. An equivalent already-committed
-	 * result is treated as idempotent success. A differing result raises a
-	 * stable internal consistency failure without placing either text in
-	 * an exception or log.
+	 * exists, compares the OCR text and all metadata for exact equality.
+	 * An equivalent already-committed result is treated as idempotent
+	 * success. A differing result raises a stable internal consistency
+	 * failure without placing either text in an exception or log.
+	 *
+	 * <p>Handles the concurrent-insert race: if a uniqueness constraint
+	 * violation occurs on insert (another transaction committed first),
+	 * the method re-reads the committed row and reconciles it into either
+	 * idempotent success or a stable conflict, rather than leaking a
+	 * raw database exception.
 	 */
 	@Transactional
 	public void persistOcrResult(UUID documentId, int promptVersion, String ocrText, String model,
@@ -131,28 +137,27 @@ public class DocumentOcrPersistenceService {
 		Optional<DocumentOcrResultEntity> existing = this.ocrResultRepository
 				.findByDocumentIdAndPromptVersion(documentId, promptVersion);
 		if (existing.isPresent()) {
-			DocumentOcrResultEntity existingResult = existing.get();
-			if (existingResult.hasEquivalentMetadata(model, finishReason, ocrText.length())) {
-				// Equivalent already-committed result: idempotent success.
-				// Ensure the document is COMPLETED.
-				PosDocumentEntity document = this.documentRepository.findById(documentId)
-						.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
-				if (document.getProcessingStatus() != DocumentProcessingStatus.COMPLETED) {
-					document.setProcessingStatus(DocumentProcessingStatus.COMPLETED);
-					this.documentRepository.saveAndFlush(document);
-				}
-				log.debug("OCR result already committed (category=ocr-idempotent); documentId={}", documentId);
-				return;
-			}
-			// Differing result: stable internal consistency failure.
-			// Never include OCR text in the exception.
-			throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
-					"OCR result conflict for document " + documentId + " prompt version " + promptVersion);
+			reconcileExistingResult(existing.get(), ocrText, model, finishReason, documentId, promptVersion);
+			return;
 		}
 
 		DocumentOcrResultId id = new DocumentOcrResultId(documentId, promptVersion);
 		DocumentOcrResultEntity result = new DocumentOcrResultEntity(id, ocrText, model, finishReason, completedAt);
-		this.ocrResultRepository.saveAndFlush(result);
+		try {
+			this.ocrResultRepository.saveAndFlush(result);
+		}
+		catch (org.springframework.dao.DataIntegrityViolationException | org.springframework.jdbc.UncategorizedSQLException e) {
+			// Concurrent-insert race: another transaction committed a row
+			// for the same (document_id, prompt_version) between our
+			// check and our insert. Re-read and reconcile.
+			Optional<DocumentOcrResultEntity> committed = this.ocrResultRepository
+					.findByDocumentIdAndPromptVersion(documentId, promptVersion);
+			if (committed.isPresent()) {
+				reconcileExistingResult(committed.get(), ocrText, model, finishReason, documentId, promptVersion);
+				return;
+			}
+			throw e;
+		}
 
 		PosDocumentEntity document = this.documentRepository.findById(documentId)
 				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
@@ -161,6 +166,36 @@ public class DocumentOcrPersistenceService {
 
 		log.debug("OCR result persisted (category=ocr-persist-success); documentId={}, promptVersion={}",
 				documentId, promptVersion);
+	}
+
+	/**
+	 * Reconciles an already-committed OCR result against the proposed
+	 * values. Equivalent means the OCR text and all metadata are exactly
+	 * equal. The OCR text is compared internally using
+	 * {@link String#equals} but is never logged or included in an
+	 * exception message.
+	 */
+	private void reconcileExistingResult(DocumentOcrResultEntity existing, String ocrText, String model,
+			String finishReason, UUID documentId, int promptVersion) {
+		boolean equivalent = existing.getOcrText().equals(ocrText)
+				&& existing.getModel().equals(model)
+				&& existing.getFinishReason().equals(finishReason);
+		if (equivalent) {
+			// Equivalent already-committed result: idempotent success.
+			// Ensure the document is COMPLETED.
+			PosDocumentEntity document = this.documentRepository.findById(documentId)
+					.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
+			if (document.getProcessingStatus() != DocumentProcessingStatus.COMPLETED) {
+				document.setProcessingStatus(DocumentProcessingStatus.COMPLETED);
+				this.documentRepository.saveAndFlush(document);
+			}
+			log.debug("OCR result already committed (category=ocr-idempotent); documentId={}", documentId);
+			return;
+		}
+		// Differing result: stable internal consistency failure.
+		// Never include OCR text in the exception.
+		throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
+				"OCR result conflict for document " + documentId + " prompt version " + promptVersion);
 	}
 
 	/**
@@ -183,50 +218,75 @@ public class DocumentOcrPersistenceService {
 	}
 
 	/**
-	 * Verifies in a transaction that the record still exists and is
-	 * active, at least one document belongs to it, every document is
-	 * {@code COMPLETED}, and every document has exactly one version-1 OCR
-	 * result. Returns {@code true} when all checks pass.
+	 * Atomically verifies that every document for the POS record is
+	 * {@code COMPLETED} with exactly one version-1 OCR result, and only
+	 * then completes the job and moves the record to
+	 * {@code REVIEW_REQUIRED} — all in a single transaction.
+	 *
+	 * <p>Inside this single transaction:
+	 * <ol>
+	 *   <li>Verify the job belongs to the supplied POS record.</li>
+	 *   <li>Verify the record is active (not soft-deleted).</li>
+	 *   <li>Verify at least one document exists.</li>
+	 *   <li>Verify every document is {@code COMPLETED}.</li>
+	 *   <li>Verify exactly one version-1 result exists per document.</li>
+	 *   <li>Complete the job and move the record to
+	 *       {@code REVIEW_REQUIRED}.</li>
+	 * </ol>
+	 *
+	 * <p>Throws {@link ConsumerException} when any verification fails,
+	 * so the job is never completed in a partially-verified state.
 	 */
-	@Transactional(readOnly = true)
-	public boolean verifyAllDocumentsOcrComplete(UUID posRecordId, int promptVersion) {
-		PosRecordEntity record = this.recordRepository.findByIdAndDeletedAtIsNull(posRecordId).orElse(null);
-		if (record == null) {
-			return false;
+	@Transactional
+	public void completeIfAllDocumentsOcrComplete(UUID jobId, UUID posRecordId, int promptVersion,
+			Instant now) {
+		// 1. Verify the job belongs to the supplied POS record.
+		IngestionJobEntity job = this.jobRepository.findById(jobId)
+				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
+		if (job.getPosRecord() == null || !job.getPosRecord().getId().equals(posRecordId)) {
+			throw new ConsumerException(ConsumerException.Code.ID_MISMATCH);
 		}
+
+		// 2. Verify the record is active.
+		PosRecordEntity record = this.recordRepository.findByIdAndDeletedAtIsNull(posRecordId)
+				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.RECORD_DELETED));
+
+		// 3. Verify at least one document exists.
 		List<PosDocumentEntity> documents = this.documentRepository
 				.findByPosRecordIdOrderBySequenceNumberAsc(posRecordId);
 		if (documents.isEmpty()) {
-			return false;
+			throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
+					"No documents found for POS record " + posRecordId);
 		}
+
+		// 4. Verify every document is COMPLETED.
 		for (PosDocumentEntity document : documents) {
 			if (document.getProcessingStatus() != DocumentProcessingStatus.COMPLETED) {
-				return false;
+				throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
+						"Document " + document.getId() + " is not COMPLETED (status="
+								+ document.getProcessingStatus() + ")");
 			}
+		}
+
+		// 5. Verify exactly one version-1 result exists per document.
+		for (PosDocumentEntity document : documents) {
 			if (!this.ocrResultRepository.existsByDocumentIdAndPromptVersion(document.getId(), promptVersion)) {
-				return false;
+				throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
+						"Document " + document.getId() + " has no version-" + promptVersion + " OCR result");
 			}
 		}
 		long ocrCount = this.ocrResultRepository.countByPosRecordIdAndPromptVersion(posRecordId, promptVersion);
-		return ocrCount == documents.size();
-	}
+		if (ocrCount != documents.size()) {
+			throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
+					"OCR result count " + ocrCount + " does not match document count " + documents.size());
+		}
 
-	/**
-	 * Atomically marks the ingestion job {@code COMPLETED}, clears its
-	 * error fields, moves the POS record to {@code REVIEW_REQUIRED}, and
-	 * updates timestamps.
-	 */
-	@Transactional
-	public void completeJobAndRecord(UUID jobId, UUID posRecordId, Instant now) {
-		IngestionJobEntity job = this.jobRepository.findById(jobId)
-				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.ID_MISMATCH));
+		// 6. All checks passed: complete the job and move the record.
 		job.complete(now);
 		job.setErrorCode(null);
 		job.setErrorMessage(null);
 		this.jobRepository.saveAndFlush(job);
 
-		PosRecordEntity record = this.recordRepository.findByIdAndDeletedAtIsNull(posRecordId)
-				.orElseThrow(() -> new ConsumerException(ConsumerException.Code.RECORD_DELETED));
 		record.setStatus(PosRecordStatus.REVIEW_REQUIRED);
 		record.setUpdatedAt(now);
 		this.recordRepository.saveAndFlush(record);

@@ -35,9 +35,13 @@ import horse.sumomo.pos_doc_backend.persistence.repository.StorageObjectReposito
  *
  * <p>Idempotency: when a redelivered message arrives, the existing rows
  * are compared against the proposed extraction across every immutable
- * field — document id, storage object id, sequence, object key, original
- * filename, content type, byte size, SHA-256, document type, and
- * processing status. Any mismatch is a permanent
+ * extraction field — document id, storage object id, sequence, object
+ * key, original filename, content type, byte size, SHA-256, and document
+ * type. The {@code processingStatus} is <em>mutable workflow state</em>
+ * (PENDING, PROCESSING, COMPLETED, FAILED) and is intentionally excluded
+ * from the comparison so that a document that has already progressed
+ * through the OCR workflow is never reset during archive redelivery.
+ * Any mismatch on an immutable field is a permanent
  * {@link ConsumerException.Code#EXTRACTION_STATE_CONFLICT} so the message
  * is sent to the DLQ.
  */
@@ -124,13 +128,17 @@ public class ExtractionPersistenceService {
 			PosDocumentEntity doc = existing.get(i);
 			ExtractedPdf pdf = proposed.get(i);
 			StorageObjectEntity storage = doc.getStorageObject();
-			// Every immutable field must match. A mismatch on any of these
-			// would mean the same POS record is being asked to point at
-			// two different archives; that is a permanent conflict.
+			// Every immutable extraction field must match. A mismatch on
+			// any of these would mean the same POS record is being asked
+			// to point at two different archives; that is a permanent
+			// conflict. The processingStatus is mutable workflow state
+			// and is intentionally NOT compared: a document may have
+			// already progressed to PROCESSING, COMPLETED, or FAILED
+			// through the OCR workflow, and redelivery must never reset
+			// it.
 			if (!doc.getId().equals(pdf.documentId())
 					|| doc.getSequenceNumber() != pdf.sequence()
 					|| doc.getDocumentType() != INITIAL_TYPE
-					|| doc.getProcessingStatus() != INITIAL_STATUS
 					|| !storage.getId().equals(pdf.storageObjectId())
 					|| !storage.getObjectKey().equals(pdf.objectKey())
 					|| !Objects.equals(storage.getOriginalFilename(), pdf.filenameSegment())

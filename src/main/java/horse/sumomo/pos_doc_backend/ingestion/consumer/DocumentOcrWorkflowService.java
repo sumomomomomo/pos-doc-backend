@@ -73,13 +73,13 @@ public class DocumentOcrWorkflowService {
 			processDocument(document.getId());
 		}
 
-		// Verify all documents are OCR-complete before completing the job.
-		if (!this.persistenceService.verifyAllDocumentsOcrComplete(posRecordId, PROMPT_VERSION)) {
-			throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
-					"Not all documents have a version-1 OCR result for POS record " + posRecordId);
-		}
-
-		this.persistenceService.completeJobAndRecord(jobId, posRecordId, Instant.now());
+		// Single transactional verification + completion: verifies the
+		// job-to-record relationship, record active state, document
+		// count, all documents COMPLETED, and exactly one version-1 OCR
+		// result per document, then completes the job and moves the
+		// record to REVIEW_REQUIRED — all atomically.
+		this.persistenceService.completeIfAllDocumentsOcrComplete(jobId, posRecordId, PROMPT_VERSION,
+				Instant.now());
 	}
 
 	/**

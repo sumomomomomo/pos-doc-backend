@@ -16,6 +16,6 @@ CREATE TABLE document_ocr_result (
     model TEXT NOT NULL CHECK (length(trim(model)) > 0),
     finish_reason TEXT NOT NULL CHECK (length(trim(finish_reason)) > 0),
     character_count INTEGER NOT NULL CHECK (character_count >= 0 AND character_count = length(ocr_text)),
-    completed_at_epoch_ms INTEGER NOT NULL,
+    completed_at INTEGER NOT NULL,
     PRIMARY KEY (document_id, prompt_version)
 );

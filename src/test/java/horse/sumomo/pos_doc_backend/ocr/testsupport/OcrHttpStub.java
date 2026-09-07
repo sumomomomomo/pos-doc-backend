@@ -8,10 +8,11 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -24,7 +25,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  * PII. No automated test contacts {@code 192.168.1.34}.
  *
  * <p>The stub records each request so tests can assert the number of OCR
- * calls and inspect request details.
+ * calls and inspect request details. Request capture is thread-safe.
+ *
+ * <p>Supports both {@code Content-Length} and chunked transfer encoding
+ * for request bodies, since OkHttp sends chunked encoding when the
+ * {@code RequestBody.contentLength()} returns -1.
+ *
+ * <p>Supports a deterministic queued-response mechanism: tests can enqueue
+ * a sequence of responses (e.g., 503 then 200) and the stub will return
+ * them in order, one per request. When the queue is exhausted, the stub
+ * falls back to the default response.
  */
 public final class OcrHttpStub implements AutoCloseable {
 
@@ -36,13 +46,19 @@ public final class OcrHttpStub implements AutoCloseable {
 	private final Thread serverThread;
 	private volatile ServerSocket serverSocket;
 	private volatile boolean running;
-	private final List<RecordedRequest> requests = new ArrayList<>();
+	private final List<RecordedRequest> requests = new CopyOnWriteArrayList<>();
 	private final AtomicInteger requestCount = new AtomicInteger(0);
 
-	/** Configurable response for the next request. */
+	/** Default response used when the queue is empty. */
 	private volatile String nextResponseJson;
 	private volatile int nextResponseStatus;
 	private volatile String nextResponseContentType;
+
+	/**
+	 * Queue of deterministic responses. Each entry is consumed by the next
+	 * request. When the queue is empty, the default response is used.
+	 */
+	private final ConcurrentLinkedQueue<QueuedResponse> responseQueue = new ConcurrentLinkedQueue<>();
 
 	public OcrHttpStub() throws IOException {
 		this("SYNTHETIC OCR TEXT", 200, "application/json");
@@ -81,13 +97,28 @@ public final class OcrHttpStub implements AutoCloseable {
 	}
 
 	/**
-	 * Sets the response for the next request. Subsequent requests use the
-	 * same response until changed again.
+	 * Sets the default response for requests when the queue is empty.
 	 */
 	public void setNextResponse(String ocrText, int status, String contentType) {
 		this.nextResponseJson = buildResponse(ocrText);
 		this.nextResponseStatus = status;
 		this.nextResponseContentType = contentType;
+	}
+
+	/**
+	 * Enqueues a deterministic response for the next request. Responses
+	 * are consumed in FIFO order. When the queue is exhausted, the default
+	 * response is used.
+	 */
+	public void enqueueResponse(String ocrText, int status, String contentType) {
+		this.responseQueue.add(new QueuedResponse(buildResponse(ocrText), status, contentType));
+	}
+
+	/**
+	 * Enqueues a raw JSON response for the next request.
+	 */
+	public void enqueueRawResponse(String json, int status, String contentType) {
+		this.responseQueue.add(new QueuedResponse(json, status, contentType));
 	}
 
 	@Override
@@ -133,7 +164,7 @@ public final class OcrHttpStub implements AutoCloseable {
 			}
 			String[] parts = requestLine.split(" ");
 			String method = parts[0];
-			String path = parts[1];
+			String path = parts.length > 1 ? parts[1] : "/";
 
 			Map<String, String> headers = new LinkedHashMap<>();
 			String headerLine;
@@ -146,35 +177,42 @@ public final class OcrHttpStub implements AutoCloseable {
 				}
 			}
 
-			// Read body.
-			String contentLengthStr = headers.get("content-length");
-			long contentLength = contentLengthStr != null ? Long.parseLong(contentLengthStr) : 0;
-			ByteArrayOutputStream bodyBuffer = new ByteArrayOutputStream();
-			byte[] copyBuf = new byte[8192];
-			long remaining = contentLength;
-			while (remaining > 0) {
-				int toRead = (int) Math.min(remaining, copyBuf.length);
-				int n = in.read(copyBuf, 0, toRead);
-				if (n == -1) {
-					break;
-				}
-				bodyBuffer.write(copyBuf, 0, n);
-				remaining -= n;
-				if (bodyBuffer.size() > MAX_CAPTURE_BYTES) {
-					break;
-				}
+			// Read body: support both Content-Length and chunked encoding.
+			byte[] body;
+			String transferEncoding = headers.get("transfer-encoding");
+			if (transferEncoding != null && transferEncoding.toLowerCase().contains("chunked")) {
+				body = readChunkedBody(in);
 			}
-			byte[] body = bodyBuffer.toByteArray();
+			else {
+				String contentLengthStr = headers.get("content-length");
+				long contentLength = contentLengthStr != null ? Long.parseLong(contentLengthStr) : 0;
+				body = readFixedLengthBody(in, contentLength);
+			}
 
 			this.requestCount.incrementAndGet();
 			this.requests.add(new RecordedRequest(method, path, headers,
 					new String(body, StandardCharsets.UTF_8)));
 
-			String responseBody = this.nextResponseJson;
+			// Select response: from queue if available, else default.
+			QueuedResponse queued = this.responseQueue.poll();
+			String responseBody;
+			int responseStatus;
+			String responseContentType;
+			if (queued != null) {
+				responseBody = queued.json();
+				responseStatus = queued.status();
+				responseContentType = queued.contentType();
+			}
+			else {
+				responseBody = this.nextResponseJson;
+				responseStatus = this.nextResponseStatus;
+				responseContentType = this.nextResponseContentType;
+			}
+
 			byte[] responseBytes = responseBody.getBytes(StandardCharsets.UTF_8);
-			String responseHeaders = "HTTP/1.1 " + this.nextResponseStatus + " "
-					+ reasonPhrase(this.nextResponseStatus) + "\r\n"
-					+ "Content-Type: " + this.nextResponseContentType + "\r\n"
+			String responseHeaders = "HTTP/1.1 " + responseStatus + " "
+					+ reasonPhrase(responseStatus) + "\r\n"
+					+ "Content-Type: " + responseContentType + "\r\n"
 					+ "Content-Length: " + responseBytes.length + "\r\n"
 					+ "Connection: close\r\n"
 					+ "\r\n";
@@ -185,6 +223,91 @@ public final class OcrHttpStub implements AutoCloseable {
 		catch (IOException e) {
 			// Connection closed or other I/O error; ignore.
 		}
+	}
+
+	/**
+	 * Reads a fixed-length body from the input stream, bounded by
+	 * {@link #MAX_CAPTURE_BYTES}.
+	 */
+	private static byte[] readFixedLengthBody(InputStream in, long contentLength) throws IOException {
+		ByteArrayOutputStream bodyBuffer = new ByteArrayOutputStream();
+		byte[] copyBuf = new byte[8192];
+		long remaining = contentLength;
+		while (remaining > 0) {
+			int toRead = (int) Math.min(remaining, copyBuf.length);
+			int n = in.read(copyBuf, 0, toRead);
+			if (n == -1) {
+				break;
+			}
+			bodyBuffer.write(copyBuf, 0, n);
+			remaining -= n;
+			if (bodyBuffer.size() > MAX_CAPTURE_BYTES) {
+				// Drain remaining bytes without capturing.
+				while (remaining > 0) {
+					int drainRead = (int) Math.min(remaining, copyBuf.length);
+					int drainN = in.read(copyBuf, 0, drainRead);
+					if (drainN == -1) {
+						break;
+					}
+					remaining -= drainN;
+				}
+				break;
+			}
+		}
+		return bodyBuffer.toByteArray();
+	}
+
+	/**
+	 * Reads a chunked-transfer-encoded body from the input stream, bounded
+	 * by {@link #MAX_CAPTURE_BYTES}. Each chunk is preceded by a
+	 * hex-size line and followed by CRLF. The final chunk has size 0.
+	 */
+	private static byte[] readChunkedBody(InputStream in) throws IOException {
+		ByteArrayOutputStream bodyBuffer = new ByteArrayOutputStream();
+		byte[] copyBuf = new byte[8192];
+		boolean exceededLimit = false;
+
+		while (true) {
+			String sizeLine = readLine(in);
+			if (sizeLine == null || sizeLine.isEmpty()) {
+				break;
+			}
+			// Strip chunk extensions (e.g., ";ext=value").
+			int semicolon = sizeLine.indexOf(';');
+			String sizeHex = semicolon >= 0 ? sizeLine.substring(0, semicolon) : sizeLine;
+			long chunkSize;
+			try {
+				chunkSize = Long.parseLong(sizeHex.trim(), 16);
+			}
+			catch (NumberFormatException e) {
+				break;
+			}
+			if (chunkSize == 0) {
+				// Final chunk: read trailing CRLF.
+				readLine(in);
+				break;
+			}
+
+			long remaining = chunkSize;
+			while (remaining > 0) {
+				int toRead = (int) Math.min(remaining, copyBuf.length);
+				int n = in.read(copyBuf, 0, toRead);
+				if (n == -1) {
+					return bodyBuffer.toByteArray();
+				}
+				if (!exceededLimit) {
+					bodyBuffer.write(copyBuf, 0, n);
+					if (bodyBuffer.size() > MAX_CAPTURE_BYTES) {
+						exceededLimit = true;
+						bodyBuffer.reset();
+					}
+				}
+				remaining -= n;
+			}
+			// Read trailing CRLF after each chunk.
+			readLine(in);
+		}
+		return bodyBuffer.toByteArray();
 	}
 
 	private static String readLine(InputStream in) throws IOException {
@@ -229,6 +352,12 @@ public final class OcrHttpStub implements AutoCloseable {
 	 * A recorded HTTP request to the stub.
 	 */
 	public record RecordedRequest(String method, String path, Map<String, String> headers, String body) {
+	}
+
+	/**
+	 * A queued deterministic response.
+	 */
+	private record QueuedResponse(String json, int status, String contentType) {
 	}
 
 }
