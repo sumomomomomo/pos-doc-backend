@@ -115,11 +115,19 @@ public class DocumentOcrWorkflowService {
 				}
 
 				// Validate the returned document ID and prompt version.
+				// These are terminal invariant failures: mark the document
+				// FAILED before throwing so the final state is consistent.
 				if (!documentId.equals(result.documentId())) {
+					this.persistenceService.markDocumentFailed(documentId);
+					log.warn("Terminal OCR identity failure (category=ocr-terminal); documentId={}, "
+							+ "reason=document-id-mismatch");
 					throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
 							"OCR result document ID mismatch for document " + documentId);
 				}
 				if (result.promptVersion() != PROMPT_VERSION) {
+					this.persistenceService.markDocumentFailed(documentId);
+					log.warn("Terminal OCR identity failure (category=ocr-terminal); documentId={}, "
+							+ "reason=prompt-version-mismatch");
 					throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
 							"OCR result prompt version mismatch for document " + documentId);
 				}

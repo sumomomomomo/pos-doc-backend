@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -43,14 +44,16 @@ public class DocumentOcrPersistenceService {
 	private final PosDocumentRepository documentRepository;
 	private final PosRecordRepository recordRepository;
 	private final IngestionJobRepository jobRepository;
+	private final JdbcTemplate jdbcTemplate;
 
 	public DocumentOcrPersistenceService(DocumentOcrResultRepository ocrResultRepository,
 			PosDocumentRepository documentRepository, PosRecordRepository recordRepository,
-			IngestionJobRepository jobRepository) {
+			IngestionJobRepository jobRepository, JdbcTemplate jdbcTemplate) {
 		this.ocrResultRepository = Objects.requireNonNull(ocrResultRepository);
 		this.documentRepository = Objects.requireNonNull(documentRepository);
 		this.recordRepository = Objects.requireNonNull(recordRepository);
 		this.jobRepository = Objects.requireNonNull(jobRepository);
+		this.jdbcTemplate = Objects.requireNonNull(jdbcTemplate);
 	}
 
 	/**
@@ -141,22 +144,32 @@ public class DocumentOcrPersistenceService {
 			return;
 		}
 
-		DocumentOcrResultId id = new DocumentOcrResultId(documentId, promptVersion);
-		DocumentOcrResultEntity result = new DocumentOcrResultEntity(id, ocrText, model, finishReason, completedAt);
-		try {
-			this.ocrResultRepository.saveAndFlush(result);
-		}
-		catch (org.springframework.dao.DataIntegrityViolationException | org.springframework.jdbc.UncategorizedSQLException e) {
+		// Use a native SQLite upsert to handle the concurrent-insert race
+		// safely. INSERT ... ON CONFLICT DO NOTHING returns 0 affected rows
+		// if the row already exists (another transaction committed first),
+		// and 1 if the insert succeeded. This avoids the JPA flush failure
+		// / rollback-only problem that would occur with saveAndFlush + catch.
+		int affected = this.jdbcTemplate.update(
+				"INSERT INTO document_ocr_result (document_id, prompt_version, ocr_text, model, "
+						+ "finish_reason, character_count, completed_at) "
+						+ "VALUES (?, ?, ?, ?, ?, ?, ?) "
+						+ "ON CONFLICT(document_id, prompt_version) DO NOTHING",
+				documentId.toString(), promptVersion, ocrText, model, finishReason,
+				ocrText.length(), completedAt.toEpochMilli());
+
+		if (affected == 0) {
 			// Concurrent-insert race: another transaction committed a row
-			// for the same (document_id, prompt_version) between our
-			// check and our insert. Re-read and reconcile.
+			// for the same (document_id, prompt_version) between our check
+			// and our insert. Re-read and reconcile.
 			Optional<DocumentOcrResultEntity> committed = this.ocrResultRepository
 					.findByDocumentIdAndPromptVersion(documentId, promptVersion);
 			if (committed.isPresent()) {
 				reconcileExistingResult(committed.get(), ocrText, model, finishReason, documentId, promptVersion);
 				return;
 			}
-			throw e;
+			throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT,
+					"OCR result insert affected 0 rows but no committed row found for document "
+							+ documentId + " prompt version " + promptVersion);
 		}
 
 		PosDocumentEntity document = this.documentRepository.findById(documentId)
