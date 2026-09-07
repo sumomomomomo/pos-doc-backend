@@ -159,6 +159,19 @@ class DocumentOcrEndToEndIntegrationTest {
 
 	@Test
 	void endToEndOcrWorkflowCompletesAllDocumentsAndJob() throws Exception {
+		// Clean up any leftover PNG temp files from previous test runs.
+		String tempDir = System.getProperty("java.io.tmpdir");
+		try (var stream = Files.list(Path.of(tempDir))) {
+			stream.filter(p -> p.getFileName().toString().startsWith("pos-doc-render-png-"))
+					.forEach(p -> {
+						try {
+							Files.deleteIfExists(p);
+						}
+						catch (Exception ignored) {
+						}
+					});
+		}
+
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
 		UUID eventId = UUID.randomUUID();
@@ -272,8 +285,8 @@ class DocumentOcrEndToEndIntegrationTest {
 		// directory. The RenderedFirstPage handle is closed via
 		// try-with-resources, which deletes the file. We verify by
 		// checking that no such files remain in the system temp directory.
-		String tempDir = System.getProperty("java.io.tmpdir");
-		try (var stream = Files.list(Path.of(tempDir))) {
+		String pngTempDir = System.getProperty("java.io.tmpdir");
+		try (var stream = Files.list(Path.of(pngTempDir))) {
 			long pngCount = stream
 					.filter(p -> p.getFileName().toString().startsWith("pos-doc-render-png-"))
 					.count();

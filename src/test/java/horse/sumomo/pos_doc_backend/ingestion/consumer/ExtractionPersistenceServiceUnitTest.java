@@ -323,7 +323,12 @@ class ExtractionPersistenceServiceUnitTest {
 	}
 
 	@Test
-	void mismatchOnProcessingStatusIsRejected() {
+	void processingStatusMismatchIsNotRejected() {
+		// Task 9 correction: processingStatus is mutable workflow state,
+		// not immutable extraction identity. A document that has progressed
+		// to PROCESSING (or COMPLETED, or FAILED) through the OCR workflow
+		// must NOT be reset during archive redelivery. The reconciliation
+		// compares only immutable extraction metadata.
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
 		UUID documentId = UUID.randomUUID();
@@ -336,6 +341,7 @@ class ExtractionPersistenceServiceUnitTest {
 				PDF_CONTENT_TYPE, 100L, sha, now);
 		PosRecordEntity record = newRecord(posRecordId, mock(StorageObjectEntity.class), now);
 		IngestionJobEntity job = newJob(jobId, record, JobStatus.RUNNING, 1L, now);
+		// Document is in PROCESSING state (OCR workflow in progress).
 		PosDocumentEntity existingDoc = new PosDocumentEntity(documentId, record, existingStorage,
 				0L, DocumentType.UNKNOWN, DocumentProcessingStatus.PROCESSING);
 
@@ -350,8 +356,15 @@ class ExtractionPersistenceServiceUnitTest {
 		RecordingTxManager txm = new RecordingTxManager();
 		ExtractionPersistenceService service = buildService(txm);
 
-		assertThrows(ConsumerException.class,
-				() -> service.persistExtraction(posRecordId, jobId, List.of(proposed), now));
+		// Must NOT throw: the immutable extraction metadata matches, and
+		// the mutable processing status is intentionally not compared.
+		service.persistExtraction(posRecordId, jobId, List.of(proposed), now);
+
+		// The document status must remain PROCESSING (not reset to PENDING).
+		assertEquals(DocumentProcessingStatus.PROCESSING, existingDoc.getProcessingStatus());
+		// Transaction committed.
+		assertEquals(1, txm.commitCount);
+		assertEquals(0, txm.rollbackCount);
 	}
 
 	@Test

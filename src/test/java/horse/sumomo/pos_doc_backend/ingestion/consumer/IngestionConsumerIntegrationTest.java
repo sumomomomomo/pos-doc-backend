@@ -220,15 +220,13 @@ class IngestionConsumerIntegrationTest {
 					var out = new ByteArrayOutputStream()) {
 				in.transferTo(out);
 				byte[] body = out.toByteArray();
-				if (body.length == PDF_A.length) {
-					assertArrayEquals(PDF_A, body);
-				}
-				else if (body.length == PDF_B.length) {
-					assertArrayEquals(PDF_B, body);
-				}
-				else {
-					throw new AssertionError("unexpected PDF size: " + body.length);
-				}
+				// The downloaded PDF must match either PDF_A or PDF_B
+				// exactly. Both are created by SyntheticPdfFactory with
+				// different text, so they have different bytes.
+				boolean matchesA = java.util.Arrays.equals(PDF_A, body);
+				boolean matchesB = java.util.Arrays.equals(PDF_B, body);
+				assertTrue(matchesA || matchesB,
+						"Downloaded PDF must match either PDF_A or PDF_B exactly");
 			}
 			keys.add(key);
 		}

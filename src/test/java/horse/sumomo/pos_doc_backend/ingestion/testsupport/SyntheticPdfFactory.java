@@ -2,6 +2,8 @@ package horse.sumomo.pos_doc_backend.ingestion.testsupport;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Calendar;
+import java.util.TimeZone;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -32,6 +34,16 @@ public final class SyntheticPdfFactory {
 	public static byte[] createPdf(String text) {
 		try (PDDocument document = new PDDocument();
 				ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+			// Set a fixed creation/modification date so the PDF bytes are
+			// deterministic across calls. PDFBox includes the current
+			// timestamp in the document info by default, which would make
+			// the PDF non-deterministic.
+			Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+			cal.clear();
+			cal.set(2026, Calendar.JANUARY, 1, 0, 0, 0);
+			document.getDocumentInformation().setCreationDate(cal);
+			document.getDocumentInformation().setModificationDate(cal);
+
 			PDRectangle a4 = PDRectangle.A4;
 			PDPage page = new PDPage(a4);
 			document.addPage(page);
