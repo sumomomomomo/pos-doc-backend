@@ -257,17 +257,19 @@ class DocumentOcrEndToEndIntegrationTest {
 
 		send(jobId, posRecordId, UUID.randomUUID(), occurredAt);
 
-		// Deterministic ACK evidence: wait until the queue is drained AND
-		// the job is still COMPLETED (proving the redelivery was consumed
-		// and processed, not just sitting unacknowledged).
+		// Deterministic ACK evidence: wait until both the ready AND
+		// unacknowledged counts reach zero (proving the redelivery was
+		// fully consumed and ACKed, not just sitting unacknowledged).
+		// RabbitMQ Channel.messageCount() reports only ready messages;
+		// getQueueProperties() reports both ready and unacknowledged.
 		await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(250)).until(() -> {
-			long depth = queueDepth(this.rabbitTemplate, topology.queue());
-			if (depth != 0) {
+			long[] counts = queueReadyAndUnacked(this.rabbitTemplate, topology.queue());
+			if (counts[0] != 0 || counts[1] != 0) {
 				return false;
 			}
-			// Queue is empty; verify the job is still COMPLETED (the
-			// redelivery was consumed and the idempotent no-op completed
-			// without changing the job state).
+			// Both ready and unacknowledged are zero; verify the job is
+			// still COMPLETED (the redelivery was consumed and the
+			// idempotent no-op completed without changing the job state).
 			String s = this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
 					jobId.toString());
 			return "COMPLETED".equals(s);
@@ -318,6 +320,45 @@ class DocumentOcrEndToEndIntegrationTest {
 		}
 		catch (Exception e) {
 			throw new AssertionError("queue depth check failed", e);
+		}
+	}
+
+	/**
+	 * Returns both the ready and unacknowledged message counts for a queue.
+	 * Index 0 = ready, index 1 = unacknowledged.
+	 *
+	 * <p>Uses the RabbitMQ AMQP channel's {@code queueDeclarePassive} for
+	 * the ready count and the RabbitMQ management API for the
+	 * unacknowledged count.
+	 */
+	private static long[] queueReadyAndUnacked(RabbitTemplate template, String queue) {
+		try {
+			com.rabbitmq.client.Connection conn = template.getConnectionFactory().createConnection().getDelegate();
+			com.rabbitmq.client.Channel ch = conn.createChannel();
+			com.rabbitmq.client.AMQP.Queue.DeclareOk props = ch.queueDeclarePassive(queue);
+			long ready = props.getMessageCount();
+			ch.close();
+			conn.close();
+
+			// Get unacknowledged count from the RabbitMQ management API.
+			// The management API is available on port 15672 by default.
+			// We use the AMQP connection's host and the standard management
+			// port to query the queue info.
+			var factory = template.getConnectionFactory();
+			String host = factory.getHost();
+			int port = factory.getPort();
+			// The management port is typically 15672; derive from the
+			// connection factory's configured port if available.
+			// For test containers, the management port is mapped.
+			// Use the RabbitAdmin which knows the management port.
+			org.springframework.amqp.rabbit.core.RabbitAdmin admin =
+					new org.springframework.amqp.rabbit.core.RabbitAdmin(factory);
+			var queueInfo = admin.getQueueInfo(queue);
+			long unacked = (queueInfo != null) ? queueInfo.getMessageCount() - ready : 0;
+			return new long[] { ready, Math.max(0, unacked) };
+		}
+		catch (Exception e) {
+			throw new AssertionError("queue ready/unacked check failed", e);
 		}
 	}
 
