@@ -1,0 +1,38 @@
+# Test-only Compose override for Task 9 whole-stack verification.
+#
+# Adds a pinned, minimal WireMock HTTP-stub container that stubs the
+# llama.cpp POST /v1/chat/completions endpoint. The stub is reachable
+# only on the Compose network; its port is NOT published to the host.
+#
+# The backend's app.ocr.llama-cpp.server-origin is overridden to point
+# at the stub via the OCR_STUB_ORIGIN environment variable, set by
+# scripts/verify-container-stack.sh.
+#
+# This file is used ONLY by scripts/verify-container-stack.sh via:
+#   docker compose --env-file ... -f compose.yaml -f compose.test-ocr.yaml ...
+#
+# The production compose.yaml remains free of llama.cpp, vLLM, GPU, or
+# mock-model services.
+
+services:
+  ocr-stub:
+    image: wiremock/wiremock:3.13.1
+    command:
+      - "--global-response-templating"
+      - "--root-dir=/home/wiremock/data"
+    volumes:
+      - ./test-ocr-stub:/home/wiremock/data
+    # No ports published: reachable only on the Compose network.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/__admin/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+
+  backend:
+    environment:
+      # Override the OCR server origin to point at the test stub.
+      # Spring Boot's relaxed binding maps APP_OCR_LLAMA_CPP_SERVER_ORIGIN
+      # to app.ocr.llama-cpp.server-origin.
+      APP_OCR_LLAMA_CPP_SERVER_ORIGIN: http://ocr-stub:8080

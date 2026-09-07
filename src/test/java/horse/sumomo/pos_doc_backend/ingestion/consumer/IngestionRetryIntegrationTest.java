@@ -94,12 +94,15 @@ class IngestionRetryIntegrationTest {
 	private static final String TEST_BUCKET = "pos-documents-retry-test";
 	private static final DockerImageName MINIO_IMAGE =
 			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
-	private static final byte[] PDF_A = ("%PDF-1.4\n% Doc A\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
-	private static final byte[] PDF_B = ("%PDF-1.4\n% Doc B (longer)\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
+	private static final byte[] PDF_A = horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory
+			.createPdf("Doc A");
+	private static final byte[] PDF_B = horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory
+			.createPdf("Doc B");
 
 	private static MinIOContainer minio;
 	private static RabbitMQContainer rabbit;
 	private static MinioClient adminClient;
+	private static horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub ocrStub;
 
 	/**
 	 * Static failure counter shared between the test instance and the
@@ -139,6 +142,9 @@ class IngestionRetryIntegrationTest {
 		rabbit = new RabbitMQContainer(DockerImageName.parse("rabbitmq:4.3.5-management"));
 		rabbit.start();
 
+		ocrStub = new horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub("SYNTHETIC OCR TEXT", 200,
+				"application/json");
+
 		registry.add("storage.minio.endpoint", minio::getS3URL);
 		registry.add("storage.minio.access-key", minio::getUserName);
 		registry.add("storage.minio.secret-key", minio::getPassword);
@@ -148,6 +154,8 @@ class IngestionRetryIntegrationTest {
 		registry.add("spring.rabbitmq.port", rabbit::getAmqpPort);
 		registry.add("spring.rabbitmq.username", rabbit::getAdminUsername);
 		registry.add("spring.rabbitmq.password", rabbit::getAdminPassword);
+
+		registry.add("app.ocr.llama-cpp.server-origin", ocrStub::getServerOrigin);
 
 		Path sqliteDbFile = Files.createTempFile("pos-doc-retry-test", ".db");
 		sqliteDbFile.toFile().deleteOnExit();
@@ -166,6 +174,9 @@ class IngestionRetryIntegrationTest {
 		}
 		if (adminClient != null) {
 			adminClient.close();
+		}
+		if (ocrStub != null) {
+			ocrStub.close();
 		}
 	}
 

@@ -173,11 +173,10 @@ class ExtractionPersistenceServiceUnitTest {
 
 		service.persistExtraction(posRecordId, jobId, List.of(proposed), now);
 
-		// Job transitioned RUNNING -> COMPLETED.
-		assertEquals(JobStatus.COMPLETED, job.getStatus());
-		ArgumentCaptor<IngestionJobEntity> jobCaptor = ArgumentCaptor.forClass(IngestionJobEntity.class);
-		verify(this.ingestionJobRepository, times(1)).saveAndFlush(jobCaptor.capture());
-		assertEquals(JobStatus.COMPLETED, jobCaptor.getValue().getStatus());
+		// Task 9: the job is NOT completed by ExtractionPersistenceService.
+		// It remains in its current status (RUNNING) until the OCR workflow
+		// completes it.
+		assertEquals(JobStatus.RUNNING, job.getStatus());
 		// No new storage or document rows were created.
 		verify(this.storageObjectRepository, never()).saveAndFlush(any(StorageObjectEntity.class));
 		verify(this.posDocumentRepository, never()).saveAndFlush(any(PosDocumentEntity.class));

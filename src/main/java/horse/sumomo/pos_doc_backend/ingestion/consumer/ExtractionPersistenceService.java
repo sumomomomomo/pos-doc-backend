@@ -18,20 +18,20 @@ import horse.sumomo.pos_doc_backend.persistence.entity.PosRecordEntity;
 import horse.sumomo.pos_doc_backend.persistence.entity.StorageObjectEntity;
 import horse.sumomo.pos_doc_backend.persistence.model.DocumentProcessingStatus;
 import horse.sumomo.pos_doc_backend.persistence.model.DocumentType;
-import horse.sumomo.pos_doc_backend.persistence.model.JobStatus;
 import horse.sumomo.pos_doc_backend.persistence.repository.IngestionJobRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.PosDocumentRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.PosRecordRepository;
 import horse.sumomo.pos_doc_backend.persistence.repository.StorageObjectRepository;
 
 /**
- * Persists the extracted PDFs and reconciles the job's terminal state in a
- * single SQLite transaction.
+ * Persists the extracted PDFs in a single SQLite transaction.
  *
- * <p>The transaction creates the {@code storage_object} rows, the
- * {@code pos_document} rows (one per PDF, all {@code UNKNOWN}/{@code PENDING}),
- * and updates the job to {@code COMPLETED}. The POS record remains
- * {@code PROCESSING} because OCR is a later task.
+ * <p>The transaction creates the {@code storage_object} rows and the
+ * {@code pos_document} rows (one per PDF, all {@code UNKNOWN}/{@code PENDING}).
+ * The job is <em>not</em> completed here: Task 9 completes it only after
+ * every document has a durable version-1 OCR result. The POS record
+ * remains {@code PROCESSING} until the OCR workflow moves it to
+ * {@code REVIEW_REQUIRED}.
  *
  * <p>Idempotency: when a redelivered message arrives, the existing rows
  * are compared against the proposed extraction across every immutable
@@ -39,9 +39,7 @@ import horse.sumomo.pos_doc_backend.persistence.repository.StorageObjectReposito
  * filename, content type, byte size, SHA-256, document type, and
  * processing status. Any mismatch is a permanent
  * {@link ConsumerException.Code#EXTRACTION_STATE_CONFLICT} so the message
- * is sent to the DLQ. If all fields match and the job is in
- * {@code QUEUED}, {@code RETRY_SCHEDULED}, or {@code RUNNING}, the same
- * transaction completes the job.
+ * is sent to the DLQ.
  */
 @Service
 public class ExtractionPersistenceService {
@@ -108,9 +106,10 @@ public class ExtractionPersistenceService {
 			this.posDocumentRepository.saveAndFlush(document);
 		}
 
-		// Always complete the job in the same transaction so a redelivery
-		// that finds a RUNNING job (e.g. crash-recovery) is reconciled.
-		completeInTx(job, now);
+		// The job is NOT completed here: Task 9 completes it only after
+		// every document has a durable version-1 OCR result. The OCR
+		// workflow (DocumentOcrWorkflowService) runs after this method
+		// returns and performs the final job completion.
 
 		log.info("Extraction persisted (category=persistence-success); posRecordId={}, jobId={}, pdfCount={}",
 				posRecordId, jobId, pdfs.size());
@@ -141,20 +140,11 @@ public class ExtractionPersistenceService {
 				throw new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT);
 			}
 		}
-		// Match. If the job is still in flight (RUNNING from a previous
-		// crash, or QUEUED/RETRY_SCHEDULED for a still-in-flight retry
-		// cycle), complete it in the same transaction. If the job is
-		// already COMPLETED, no-op.
-		if (job.getStatus() != JobStatus.COMPLETED) {
-			completeInTx(job, now);
-		}
+		// Match. The job is NOT completed here: Task 9 completes it only
+		// after every document has a durable version-1 OCR result. The
+		// OCR workflow runs after this method returns.
 		log.debug("Reconciled existing extraction (category=persistence-idempotent); jobId={}, pdfCount={}",
 				job.getId(), existing.size());
-	}
-
-	private void completeInTx(IngestionJobEntity job, Instant now) {
-		job.complete(now);
-		this.ingestionJobRepository.saveAndFlush(job);
 	}
 
 	/**

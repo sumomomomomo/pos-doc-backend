@@ -40,6 +40,7 @@ public class IngestionConsumerService {
 	private final SourceArchiveDownloader downloader;
 	private final ArchiveExtractionService extractor;
 	private final ExtractionPersistenceService persistenceService;
+	private final DocumentOcrWorkflowService ocrWorkflowService;
 
 	private final IngestionConsumerService self;
 
@@ -47,7 +48,8 @@ public class IngestionConsumerService {
 			IngestionJobRepository jobRepository,
 			PosRecordRepository recordRepository, StorageObjectRepository storageObjectRepository,
 			SourceArchiveDownloader downloader, ArchiveExtractionService extractor,
-			ExtractionPersistenceService persistenceService) {
+			ExtractionPersistenceService persistenceService,
+			DocumentOcrWorkflowService ocrWorkflowService) {
 		this.self = self;
 		this.jobRepository = Objects.requireNonNull(jobRepository);
 		this.recordRepository = Objects.requireNonNull(recordRepository);
@@ -55,6 +57,7 @@ public class IngestionConsumerService {
 		this.downloader = Objects.requireNonNull(downloader);
 		this.extractor = Objects.requireNonNull(extractor);
 		this.persistenceService = Objects.requireNonNull(persistenceService);
+		this.ocrWorkflowService = Objects.requireNonNull(ocrWorkflowService);
 	}
 
 	/**
@@ -132,14 +135,14 @@ public class IngestionConsumerService {
 			throw e;
 		}
 
+		UUID posRecordId = self.loadPosRecordIdForJob(claim.jobId());
 		List<ExtractedPdf> extracted = new ArrayList<>();
 		List<ExtractedPdf> uploaded = new ArrayList<>();
 		try (var ignored = downloaded) {
 			extracted = this.extractor.extractAndStore(downloaded.getTempPath(), downloaded.getByteCount(),
-					self.loadPosRecordIdForJob(claim.jobId()));
+					posRecordId);
 			uploaded.addAll(extracted);
-			this.persistenceService.persistExtraction(self.loadPosRecordIdForJob(claim.jobId()), claim.jobId(),
-					extracted, Instant.now());
+			this.persistenceService.persistExtraction(posRecordId, claim.jobId(), extracted, Instant.now());
 		}
 		catch (ConsumerException e) {
 			this.extractor.compensate(uploaded);
@@ -149,6 +152,12 @@ public class IngestionConsumerService {
 			this.extractor.compensate(uploaded);
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
 		}
+
+		// Task 9: run the OCR workflow after extraction. This calls
+		// FirstPageOcrService for every document, persists a version-1
+		// OCR result for each, then completes the job and moves the POS
+		// record to REVIEW_REQUIRED.
+		this.ocrWorkflowService.runOcrWorkflow(posRecordId, claim.jobId());
 	}
 
 	@Transactional(readOnly = true)

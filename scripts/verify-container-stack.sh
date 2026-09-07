@@ -79,7 +79,7 @@ cd "${ROOT_DIR}"
 UPLOAD_RESPONSE_FILE=""
 
 cleanup() {
-    docker compose --env-file "${ENV_FILE}" -p "${PROJECT_NAME}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    docker compose --env-file "${ENV_FILE}" -p "${PROJECT_NAME}" -f compose.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
     if [ -n "${ENV_FILE}" ]; then
         rm -f "${ENV_FILE}"
         ENV_FILE=""
@@ -115,17 +115,17 @@ wait_for_url() {
 # --- 1: validate compose configuration ---------------------------------------
 
 echo "== compose config =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" config --quiet
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml config --quiet
 
 # --- 2: build the backend image ----------------------------------------------
 
 echo "== build backend =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" build backend
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml build backend
 
 # --- 3: start the stack and wait for healthy ----------------------------------
 
 echo "== up --detach --wait =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" up --detach --wait
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml up --detach --wait
 
 # --- 4: MinIO liveness --------------------------------------------------------
 
@@ -157,7 +157,7 @@ esac
 echo "== sqlite file check =="
 # Wrap in sh -c so Windows shells (MSYS/Git Bash) do not rewrite the absolute
 # /data/... path to a host path before it reaches the container.
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
 echo "sqlite: database file present in backend container"
 
 # --- 8: upload a persistence marker with one-shot mc --------------------------
@@ -168,7 +168,7 @@ MINIO_ALIAS_SETUP='mc alias set --quiet local "http://minio:9000" "$MINIO_ROOT_U
 # `docker compose run` inherits. We do not pass `--entrypoint /bin/sh` here
 # because MSYS-based shells (Git Bash) rewrite the absolute path argument to
 # a host path before it reaches the CLI.
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; printf 'minio-persistence-check' | mc pipe local/pos-documents-test/smoke/persistence.txt >/dev/null"
 echo "minio: marker uploaded"
@@ -176,11 +176,11 @@ echo "minio: marker uploaded"
 # --- 9: restart only MinIO and verify the marker survived ---------------------
 
 echo "== restart minio =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" restart minio
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart minio
 wait_for_url "http://localhost:9000/minio/health/live" 60
 
 echo "== verify marker survived minio restart =="
-MARKER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
+MARKER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; mc cat local/pos-documents-test/smoke/persistence.txt 2>/dev/null")"
 if [ "${MARKER}" = "minio-persistence-check" ]; then
@@ -193,10 +193,10 @@ fi
 # --- 10: restart only the backend and re-verify --------------------------------
 
 echo "== restart backend =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" restart backend
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart backend
 i=0
 while [ "${i}" -lt 60 ]; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" ps -q backend)" 2>/dev/null || echo starting)"
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
     if [ "${STATUS}" = "healthy" ]; then
         break
     fi
@@ -210,7 +210,7 @@ fi
 echo "backend: healthy after restart"
 
 echo "== re-check sqlite file and dummy endpoint =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
 echo "sqlite: still present after backend restart"
 DUMMY_RESPONSE="$(curl --fail --silent --show-error \
     http://localhost:8080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
@@ -225,7 +225,7 @@ echo "== rabbitmq health check =="
 i=0
 RABBIT_STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" ps -q rabbitmq)" 2>/dev/null || echo starting)"
+    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q rabbitmq)" 2>/dev/null || echo starting)"
     if [ "${RABBIT_STATUS}" = "healthy" ]; then
         break
     fi
@@ -356,11 +356,11 @@ echo "message: identifiers only, no fixture metadata"
 # --- 14: RabbitMQ restart keeps the durable queue and its message -------------
 
 echo "== restart rabbitmq =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" restart rabbitmq
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart rabbitmq
 i=0
 RABBIT_STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" ps -q rabbitmq)" 2>/dev/null || echo starting)"
+    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q rabbitmq)" 2>/dev/null || echo starting)"
     if [ "${RABBIT_STATUS}" = "healthy" ]; then
         break
     fi
@@ -396,11 +396,11 @@ echo "queue: persistent message survived rabbitmq restart"
 # --- 15: backend restart keeps the job queryable and queued -------------------
 
 echo "== restart backend after rabbitmq restart =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" restart backend
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart backend
 i=0
 STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" ps -q backend)" 2>/dev/null || echo starting)"
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
     if [ "${STATUS}" = "healthy" ]; then
         break
     fi
@@ -434,11 +434,11 @@ RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
 RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
 INGESTION_CONSUMER_ENABLED=true
 EOF
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" up --detach --wait backend >/dev/null
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml up --detach --wait backend >/dev/null
 i=0
 STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" ps -q backend)" 2>/dev/null || echo starting)"
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
     if [ "${STATUS}" = "healthy" ]; then
         break
     fi
@@ -481,7 +481,7 @@ if [ "${HAS_NON_NULL_ERROR_CODE}" -eq 1 ] || [ "${HAS_NON_NULL_ERROR_MESSAGE}" -
 fi
 echo "job: no terminal error"
 
-echo "== pos_document: exactly two ordered UNKNOWN/PENDING rows =="
+echo "== pos_document: exactly two ordered COMPLETED rows (Task 9) =="
 DOCS_RESPONSE="$(curl --fail --silent --show-error \
     http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
 COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
@@ -490,25 +490,23 @@ if [ "${COUNT}" != "2" ]; then
     exit 1
 fi
 case "${DOCS_RESPONSE}" in
-    *'"processingStatus":"PENDING"'*'"processingStatus":"PENDING"'*)
-        echo "documents: two rows, both PENDING" ;;
+    *'"processingStatus":"COMPLETED"'*'"processingStatus":"COMPLETED"'*)
+        echo "documents: two rows, both COMPLETED" ;;
     *)
-        echo "ERROR: documents not in PENDING state: ${DOCS_RESPONSE}" >&2
+        echo "ERROR: documents not in COMPLETED state: ${DOCS_RESPONSE}" >&2
         exit 1 ;;
 esac
 
-echo "== pos_record remains PROCESSING =="
-# The GET /pos-records/{id} endpoint is backed by a dummy service that
-# always returns COMPLETED. The real persisted status lives in SQLite.
-# We verify it by checking the SQLite file for the record's status value.
-# SQLite stores text values verbatim in the file, so a binary grep for
-# the record ID followed by PROCESSING is reliable for this check.
-RECORD_STATUS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" exec -T backend \
-    sh -c "grep -c 'PROCESSING' /data/sqlite/pos-doc.db 2>/dev/null || echo 0")"
-if [ "${RECORD_STATUS}" -gt 0 ] 2>/dev/null; then
-    echo "pos_record: PROCESSING"
+echo "== pos_record is REVIEW_REQUIRED (Task 9) =="
+# After Task 9, the POS record must be REVIEW_REQUIRED (durable OCR exists
+# but structured policy metadata has not yet been extracted). We verify
+# via sqlite3 query.
+RECORD_STATUS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';\" 2>/dev/null || echo UNKNOWN")"
+if [ "${RECORD_STATUS}" = "REVIEW_REQUIRED" ]; then
+    echo "pos_record: REVIEW_REQUIRED"
 else
-    echo "ERROR: pos_record status not PROCESSING in SQLite" >&2
+    echo "ERROR: pos_record status is '${RECORD_STATUS}', expected REVIEW_REQUIRED" >&2
     exit 1
 fi
 
@@ -540,7 +538,7 @@ done
 echo "queues: empty"
 
 echo "== source archive and two UUID-keyed PDFs are in MinIO =="
-KEYS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps \
+KEYS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
 SOURCE_COUNT="$(printf '%s' "${KEYS}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
@@ -567,7 +565,7 @@ for KEY in ${PDF_KEYS}; do
     SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
     # --quiet suppresses docker compose's own stdout (container lifecycle
     # messages) so only the mc cat payload reaches the file.
-    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" run --rm --no-deps --quiet \
+    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps --quiet \
         -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
         minio-init "${MINIO_ALIAS_SETUP}; mc cat local/${MINIO_BUCKET}/${KEY} 2>/dev/null" > "${EXTRACT_DIR}/${SAFE_KEY}"
 done
@@ -656,6 +654,71 @@ if [ "${COUNT_AFTER}" != "2" ]; then
     exit 1
 fi
 echo "duplicate: ACK'd as no-op; document count unchanged"
+
+# --- Task 9: OCR verification -------------------------------------------------
+
+echo "== OCR stub health check =="
+# The OCR stub is reachable only on the Compose network. We check its
+# health via the backend container (which is on the same network).
+OCR_STUB_HEALTH="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c 'curl --fail --silent --show-error http://ocr-stub:8080/__admin/health 2>/dev/null || echo unhealthy')"
+case "${OCR_STUB_HEALTH}" in
+    *"UP"*) echo "ocr-stub: healthy" ;;
+    *) echo "ERROR: OCR stub is not healthy: ${OCR_STUB_HEALTH}" >&2; exit 1 ;;
+esac
+
+echo "== OCR results in SQLite =="
+# Verify that SQLite contains one version-1 result per extracted PDF.
+OCR_RESULT_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1;\" 2>/dev/null || echo 0")"
+if [ "${OCR_RESULT_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 version-1 OCR results, got ${OCR_RESULT_COUNT}." >&2
+    exit 1
+fi
+echo "sqlite: 2 version-1 OCR results present"
+
+echo "== document and job statuses are final =="
+# Documents must be COMPLETED.
+DOC_STATUS_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';\" 2>/dev/null || echo 0")"
+if [ "${DOC_STATUS_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 COMPLETED documents, got ${DOC_STATUS_COUNT}." >&2
+    exit 1
+fi
+echo "documents: both COMPLETED"
+
+echo "== POS record is REVIEW_REQUIRED =="
+RECORD_STATUS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';\" 2>/dev/null || echo UNKNOWN")"
+if [ "${RECORD_STATUS}" != "REVIEW_REQUIRED" ]; then
+    echo "ERROR: POS record status is '${RECORD_STATUS}', expected REVIEW_REQUIRED." >&2
+    exit 1
+fi
+echo "pos_record: REVIEW_REQUIRED"
+
+echo "== MinIO still contains the original ZIP and extracted PDFs =="
+KEYS_AFTER_OCR="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+    -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+    minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
+SOURCE_COUNT_AFTER="$(printf '%s' "${KEYS_AFTER_OCR}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
+PDF_COUNT_AFTER="$(printf '%s' "${KEYS_AFTER_OCR}" | grep -cE "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
+if [ "${SOURCE_COUNT_AFTER}" != "1" ]; then
+    echo "ERROR: source archive missing after OCR." >&2
+    exit 1
+fi
+if [ "${PDF_COUNT_AFTER}" != "2" ]; then
+    echo "ERROR: expected 2 PDFs after OCR, got ${PDF_COUNT_AFTER}." >&2
+    exit 1
+fi
+echo "minio: source archive and 2 PDFs still present after OCR"
+
+echo "== no PNG objects were created in MinIO =="
+PNG_COUNT="$(printf '%s' "${KEYS_AFTER_OCR}" | grep -cE '\.png$' || true)"
+if [ "${PNG_COUNT}" != "0" ]; then
+    echo "ERROR: ${PNG_COUNT} PNG objects found in MinIO; no PNG objects should be created." >&2
+    exit 1
+fi
+echo "minio: no PNG objects created"
 
 echo ""
 echo "verify-container-stack: ALL CHECKS PASSED"

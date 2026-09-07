@@ -1,0 +1,13 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/v1/chat/completions"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"SYNTHETIC OCR TEXT\"},\"finish_reason\":\"stop\"}]}"
+  }
+}
