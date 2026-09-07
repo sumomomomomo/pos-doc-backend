@@ -657,20 +657,40 @@ echo "duplicate: ACK'd as no-op; document count unchanged"
 
 # --- Task 9: OCR verification -------------------------------------------------
 
-echo "== OCR stub health check =="
-# The OCR stub is reachable only on the Compose network. We check its
-# health via the backend container (which is on the same network).
-OCR_STUB_HEALTH="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --fail --silent --show-error http://ocr-stub:8080/__admin/health 2>/dev/null || echo unhealthy')"
-case "${OCR_STUB_HEALTH}" in
-    *"UP"*) echo "ocr-stub: healthy" ;;
-    *) echo "ERROR: OCR stub is not healthy: ${OCR_STUB_HEALTH}" >&2; exit 1 ;;
-esac
+# Use a test-only SQLite CLI container attached read-only to the SQLite
+# volume, since the backend runtime image contains the JRE and curl but
+# not the sqlite3 CLI.
+sqlite_query() {
+    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+        -v "${STACK_ID}_sqlite-data:/db:ro" \
+        alpine:3.20 sh -c "apk add --no-cache sqlite >/dev/null 2>&1; sqlite3 /db/pos-doc.db \"$1\""
+}
+
+echo "== OCR stub health check (WireMock) =="
+# WireMock documents GET /__admin/mappings as a way to confirm the
+# standalone server is working. We assert HTTP success (200) rather
+# than assuming a Spring-style UP body.
+OCR_STUB_HTTP_CODE="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c 'curl --silent --output /dev/null --write-out "%{http_code}" http://ocr-stub:8080/__admin/mappings 2>/dev/null || echo 000')"
+if [ "${OCR_STUB_HTTP_CODE}" != "200" ]; then
+    echo "ERROR: OCR stub (WireMock) is not healthy: HTTP ${OCR_STUB_HTTP_CODE} from /__admin/mappings" >&2
+    exit 1
+fi
+echo "ocr-stub: WireMock healthy (HTTP 200 from /__admin/mappings)"
+
+echo "== OCR request count via WireMock journal =="
+# Query WireMock's request journal to verify exactly two OCR calls
+# after the initial two-PDF ingestion.
+OCR_REQUEST_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c 'curl --silent --show-error http://ocr-stub:8080/__admin/requests 2>/dev/null | grep -c "chat/completions" || echo 0')"
+if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
+    exit 1
+fi
+echo "wiremock: exactly 2 OCR requests recorded"
 
 echo "== OCR results in SQLite =="
-# Verify that SQLite contains one version-1 result per extracted PDF.
-OCR_RESULT_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1;\" 2>/dev/null || echo 0")"
+OCR_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1;")"
 if [ "${OCR_RESULT_COUNT}" != "2" ]; then
     echo "ERROR: expected 2 version-1 OCR results, got ${OCR_RESULT_COUNT}." >&2
     exit 1
@@ -678,9 +698,7 @@ fi
 echo "sqlite: 2 version-1 OCR results present"
 
 echo "== document and job statuses are final =="
-# Documents must be COMPLETED.
-DOC_STATUS_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';\" 2>/dev/null || echo 0")"
+DOC_STATUS_COUNT="$(sqlite_query "SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';")"
 if [ "${DOC_STATUS_COUNT}" != "2" ]; then
     echo "ERROR: expected 2 COMPLETED documents, got ${DOC_STATUS_COUNT}." >&2
     exit 1
@@ -688,8 +706,7 @@ fi
 echo "documents: both COMPLETED"
 
 echo "== POS record is REVIEW_REQUIRED =="
-RECORD_STATUS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c "sqlite3 /data/sqlite/pos-doc.db \"SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';\" 2>/dev/null || echo UNKNOWN")"
+RECORD_STATUS="$(sqlite_query "SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
 if [ "${RECORD_STATUS}" != "REVIEW_REQUIRED" ]; then
     echo "ERROR: POS record status is '${RECORD_STATUS}', expected REVIEW_REQUIRED." >&2
     exit 1

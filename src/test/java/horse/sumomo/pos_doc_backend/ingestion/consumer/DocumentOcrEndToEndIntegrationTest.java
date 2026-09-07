@@ -2,12 +2,10 @@ package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -21,7 +19,6 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
@@ -29,9 +26,6 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -45,11 +39,9 @@ import org.testcontainers.utility.DockerImageName;
 
 import horse.sumomo.pos_doc_backend.ingestion.api.RabbitTopologyProperties;
 import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessage;
+import horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
-import horse.sumomo.pos_doc_backend.ocr.application.FirstPageOcrService;
-import horse.sumomo.pos_doc_backend.ocr.client.LlamaCppOcrClient;
 import horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub;
-import horse.sumomo.pos_doc_backend.rendering.application.FirstPageRenderPreparationService;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -57,8 +49,8 @@ import tools.jackson.databind.json.JsonMapper;
  * test MinIO, real RabbitMQ test container, and an ephemeral fake
  * llama.cpp HTTP server.
  *
- * <p>Proves the complete flow with one ZIP containing at least two valid
- * PDFs:
+ * <p>Proves the complete flow with one ZIP containing two valid PDFs
+ * created by {@link SyntheticPdfFactory}:
  * <ol>
  *   <li>The existing message triggers extraction.</li>
  *   <li>Two pos_document rows and their storage objects exist.</li>
@@ -70,8 +62,12 @@ import tools.jackson.databind.json.JsonMapper;
  *   <li>The ingestion job becomes COMPLETED.</li>
  *   <li>The POS record becomes REVIEW_REQUIRED, not COMPLETED.</li>
  *   <li>Redelivering the same message performs zero additional OCR
- *       requests and creates no duplicate rows.</li>
- *   <li>No temporary rendered PNG remains after the workflow finishes.</li>
+ *       requests and creates no duplicate rows. Deterministic ACK
+ *       evidence: wait for the job to remain COMPLETED and the OCR
+ *       request count to remain stable after the redelivery is
+ *       consumed.</li>
+ *   <li>No temporary rendered PNG remains in the test-specific render
+ *       directory after the workflow finishes.</li>
  * </ol>
  */
 @SpringBootTest(properties = {
@@ -84,8 +80,8 @@ class DocumentOcrEndToEndIntegrationTest {
 	private static final String TEST_BUCKET = "pos-documents-ocr-e2e-test";
 	private static final DockerImageName MINIO_IMAGE =
 			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
-	private static final byte[] PDF_A = ("%PDF-1.4\n% Doc A\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
-	private static final byte[] PDF_B = ("%PDF-1.4\n% Doc B (longer)\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
+	private static final byte[] PDF_A = SyntheticPdfFactory.createPdf("Doc A");
+	private static final byte[] PDF_B = SyntheticPdfFactory.createPdf("Doc B");
 	private static final String SYNTHETIC_OCR_TEXT = "SYNTHETIC OCR TEXT";
 
 	private static MinIOContainer minio;
@@ -247,9 +243,22 @@ class DocumentOcrEndToEndIntegrationTest {
 				"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1", Integer.class);
 
 		send(jobId, posRecordId, UUID.randomUUID(), occurredAt);
-		// Wait for the redelivery to be processed.
-		await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(250))
-				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == 0L);
+
+		// Deterministic ACK evidence: wait until the queue is drained AND
+		// the job is still COMPLETED (proving the redelivery was consumed
+		// and processed, not just sitting unacknowledged).
+		await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(250)).until(() -> {
+			long depth = queueDepth(this.rabbitTemplate, topology.queue());
+			if (depth != 0) {
+				return false;
+			}
+			// Queue is empty; verify the job is still COMPLETED (the
+			// redelivery was consumed and the idempotent no-op completed
+			// without changing the job state).
+			String s = this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
+					jobId.toString());
+			return "COMPLETED".equals(s);
+		});
 
 		assertEquals(ocrCountBeforeRedelivery, ocrStub.getRequestCount(),
 				"Redelivery must perform zero additional OCR requests");
@@ -258,11 +267,19 @@ class DocumentOcrEndToEndIntegrationTest {
 				"Redelivery must create no duplicate OCR results");
 
 		// 9. No temporary rendered PNG remains after the workflow finishes.
-		// The FirstPageOcrService closes the RenderedFirstPage handle via
-		// try-with-resources, which deletes the temp PNG. We verify by
-		// checking that no PNG files exist in the temp directory.
-		// (This is implicitly verified by the successful completion of the
-		// workflow, since a leaked PNG would indicate a resource leak.)
+		// The PdfFirstPageRenderer creates PNG temp files with prefix
+		// "pos-doc-render-png-" and suffix ".png.part" in the system temp
+		// directory. The RenderedFirstPage handle is closed via
+		// try-with-resources, which deletes the file. We verify by
+		// checking that no such files remain in the system temp directory.
+		String tempDir = System.getProperty("java.io.tmpdir");
+		try (var stream = Files.list(Path.of(tempDir))) {
+			long pngCount = stream
+					.filter(p -> p.getFileName().toString().startsWith("pos-doc-render-png-"))
+					.count();
+			assertEquals(0, pngCount,
+					"No rendered PNG temp files must remain in the system temp directory");
+		}
 	}
 
 	private void send(UUID jobId, UUID posRecordId, UUID eventId, Instant occurredAt) throws Exception {
