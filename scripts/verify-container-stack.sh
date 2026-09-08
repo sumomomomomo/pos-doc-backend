@@ -625,6 +625,67 @@ fi
 echo "pdfs: both extracted PDFs byte-for-byte equal fixture entries"
 rm -rf "${EXTRACT_DIR}"
 
+# --- Task 9: OCR verification (before duplicate delivery) ---------------------
+
+echo "== OCR stub health check (WireMock) =="
+OCR_STUB_HTTP_CODE="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+    sh -c 'curl --silent --output /dev/null --write-out "%{http_code}" http://ocr-stub:8080/__admin/mappings 2>/dev/null || echo 000')"
+if [ "${OCR_STUB_HTTP_CODE}" != "200" ]; then
+    echo "ERROR: OCR stub (WireMock) is not healthy: HTTP ${OCR_STUB_HTTP_CODE} from /__admin/mappings" >&2
+    exit 1
+fi
+echo "ocr-stub: WireMock healthy (HTTP 200 from /__admin/mappings)"
+
+echo "== OCR request count via WireMock request-count endpoint =="
+OCR_REQUEST_COUNT="$(ocr_request_count)"
+if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
+    exit 1
+fi
+echo "wiremock: exactly 2 OCR requests recorded"
+
+echo "== OCR results in SQLite =="
+OCR_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1;")"
+if [ "${OCR_RESULT_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 version-1 OCR results, got ${OCR_RESULT_COUNT}." >&2
+    exit 1
+fi
+echo "sqlite: 2 version-1 OCR results present"
+
+echo "== document and job statuses are final =="
+DOC_STATUS_COUNT="$(sqlite_query "SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';")"
+if [ "${DOC_STATUS_COUNT}" != "2" ]; then
+    echo "ERROR: expected 2 COMPLETED documents, got ${DOC_STATUS_COUNT}." >&2
+    exit 1
+fi
+echo "documents: both COMPLETED"
+
+echo "== POS record is REVIEW_REQUIRED =="
+RECORD_STATUS="$(sqlite_query "SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
+if [ "${RECORD_STATUS}" != "REVIEW_REQUIRED" ]; then
+    echo "ERROR: expected REVIEW_REQUIRED, got ${RECORD_STATUS}." >&2
+    exit 1
+fi
+echo "pos_record: REVIEW_REQUIRED"
+
+echo "== MinIO still contains the original ZIP and extracted PDFs =="
+MINIO_CHECK2="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T minio-init \
+    sh -c "mc alias set local http://minio:9000 \${MINIO_ROOT_USER} \${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; mc ls --recursive local/pos-documents/ 2>/dev/null | grep -c '\.pdf'")"
+if [ "${MINIO_CHECK2}" != "2" ]; then
+    echo "ERROR: expected 2 PDFs in MinIO, got ${MINIO_CHECK2}." >&2
+    exit 1
+fi
+echo "minio: source archive and 2 PDFs still present after OCR"
+
+echo "== no PNG objects were created in MinIO =="
+PNG_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T minio-init \
+    sh -c "mc alias set local http://minio:9000 \${MINIO_ROOT_USER} \${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; mc ls --recursive local/pos-documents/ 2>/dev/null | grep -c '\.png' || true")"
+if [ "${PNG_COUNT}" != "0" ]; then
+    echo "ERROR: PNG objects found in MinIO (should be 0): ${PNG_COUNT}." >&2
+    exit 1
+fi
+echo "minio: no PNG objects created"
+
 echo "== duplicate message is a no-op (idempotency) =="
 # Re-publish a message with the same jobId/posRecordId; the consumer must
 # treat it as IDEMPOTENT_NOOP. The eventId is a fresh UUID (the original
@@ -697,76 +758,6 @@ if [ "${OCR_REQUEST_COUNT_AFTER}" != "2" ]; then
     exit 1
 fi
 echo "wiremock: still exactly 2 OCR requests after duplicate delivery"
-
-# --- Task 9: OCR verification -------------------------------------------------
-
-echo "== OCR stub health check (WireMock) =="
-# WireMock documents GET /__admin/mappings as a way to confirm the
-# standalone server is working. We assert HTTP success (200) rather
-# than assuming a Spring-style UP body.
-OCR_STUB_HTTP_CODE="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --output /dev/null --write-out "%{http_code}" http://ocr-stub:8080/__admin/mappings 2>/dev/null || echo 000')"
-if [ "${OCR_STUB_HTTP_CODE}" != "200" ]; then
-    echo "ERROR: OCR stub (WireMock) is not healthy: HTTP ${OCR_STUB_HTTP_CODE} from /__admin/mappings" >&2
-    exit 1
-fi
-echo "ocr-stub: WireMock healthy (HTTP 200 from /__admin/mappings)"
-
-echo "== OCR request count via WireMock request-count endpoint =="
-OCR_REQUEST_COUNT="$(ocr_request_count)"
-if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
-    echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
-    exit 1
-fi
-echo "wiremock: exactly 2 OCR requests recorded"
-
-echo "== OCR results in SQLite =="
-OCR_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1;")"
-if [ "${OCR_RESULT_COUNT}" != "2" ]; then
-    echo "ERROR: expected 2 version-1 OCR results, got ${OCR_RESULT_COUNT}." >&2
-    exit 1
-fi
-echo "sqlite: 2 version-1 OCR results present"
-
-echo "== document and job statuses are final =="
-DOC_STATUS_COUNT="$(sqlite_query "SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';")"
-if [ "${DOC_STATUS_COUNT}" != "2" ]; then
-    echo "ERROR: expected 2 COMPLETED documents, got ${DOC_STATUS_COUNT}." >&2
-    exit 1
-fi
-echo "documents: both COMPLETED"
-
-echo "== POS record is REVIEW_REQUIRED =="
-RECORD_STATUS="$(sqlite_query "SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
-if [ "${RECORD_STATUS}" != "REVIEW_REQUIRED" ]; then
-    echo "ERROR: POS record status is '${RECORD_STATUS}', expected REVIEW_REQUIRED." >&2
-    exit 1
-fi
-echo "pos_record: REVIEW_REQUIRED"
-
-echo "== MinIO still contains the original ZIP and extracted PDFs =="
-KEYS_AFTER_OCR="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
-    -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-    minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
-SOURCE_COUNT_AFTER="$(printf '%s' "${KEYS_AFTER_OCR}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
-PDF_COUNT_AFTER="$(printf '%s' "${KEYS_AFTER_OCR}" | grep -cE "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
-if [ "${SOURCE_COUNT_AFTER}" != "1" ]; then
-    echo "ERROR: source archive missing after OCR." >&2
-    exit 1
-fi
-if [ "${PDF_COUNT_AFTER}" != "2" ]; then
-    echo "ERROR: expected 2 PDFs after OCR, got ${PDF_COUNT_AFTER}." >&2
-    exit 1
-fi
-echo "minio: source archive and 2 PDFs still present after OCR"
-
-echo "== no PNG objects were created in MinIO =="
-PNG_COUNT="$(printf '%s' "${KEYS_AFTER_OCR}" | grep -cE '\.png$' || true)"
-if [ "${PNG_COUNT}" != "0" ]; then
-    echo "ERROR: ${PNG_COUNT} PNG objects found in MinIO; no PNG objects should be created." >&2
-    exit 1
-fi
-echo "minio: no PNG objects created"
 
 echo ""
 echo "verify-container-stack: ALL CHECKS PASSED"
