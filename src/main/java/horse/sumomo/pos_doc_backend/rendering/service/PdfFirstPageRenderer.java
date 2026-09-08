@@ -68,6 +68,7 @@ public class PdfFirstPageRenderer {
 	 */
 	Runnable onBeforePermitAcquire;
 
+	@org.springframework.beans.factory.annotation.Autowired
 	public PdfFirstPageRenderer(FirstPageRenderingProperties properties) {
 		this(properties, TempFileFactory.systemDefault());
 	}

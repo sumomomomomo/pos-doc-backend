@@ -50,6 +50,7 @@ public class StoredPdfMaterializer {
 	private final FirstPageRenderingProperties properties;
 	private final TempFileFactory tempFileFactory;
 
+	@org.springframework.beans.factory.annotation.Autowired
 	public StoredPdfMaterializer(MinioObjectStorage storage, FirstPageRenderingProperties properties) {
 		this(storage, properties, TempFileFactory.systemDefault());
 	}

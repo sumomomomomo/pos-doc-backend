@@ -83,7 +83,6 @@ import tools.jackson.databind.json.JsonMapper;
 		"app.ingestion.consumer.enabled=true"
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-@org.springframework.context.annotation.Import(DocumentOcrEndToEndIntegrationTest.TestRenderConfig.class)
 class DocumentOcrEndToEndIntegrationTest {
 
 	private static final String TEST_BUCKET = "pos-documents-ocr-e2e-test";
@@ -98,8 +97,8 @@ class DocumentOcrEndToEndIntegrationTest {
 	private static MinioClient adminClient;
 	private static OcrHttpStub ocrStub;
 
-	@TempDir
-	static Path renderTempDir;
+	@Autowired
+	private TempFileFactory testTempFileFactory;
 
 	@Autowired
 	private RabbitTemplate rabbitTemplate;
@@ -287,9 +286,12 @@ class DocumentOcrEndToEndIntegrationTest {
 		// 9. No temporary rendered files remain in the test-owned temp
 		//    directory after the workflow finishes. The PdfFirstPageRenderer
 		//    and StoredPdfMaterializer use the injected TempFileFactory
-		//    (see TestRenderConfig) which writes to this @TempDir.
-		//    JUnit owns the @TempDir lifecycle (created before, deleted after).
-		try (var stream = Files.list(renderTempDir)) {
+		//    (see TestRenderConfig) which writes to a test-owned directory
+		//    created at bean initialization.
+		Path testDir = this.testTempFileFactory.createTempFile("probe", ".probe");
+		Files.deleteIfExists(testDir);
+		Path parentDir = testDir.getParent();
+		try (var stream = Files.list(parentDir)) {
 			long fileCount = stream.count();
 			assertEquals(0, fileCount,
 					"Test-owned render temp directory must be empty after processing");
@@ -390,28 +392,59 @@ class DocumentOcrEndToEndIntegrationTest {
 	}
 
 	/**
-		* Overrides the rendering beans to use a test-owned temp directory
-		* for temp file creation. The @TempDir field is managed by JUnit
-		* (created before the test class, deleted after).
-		*/
-	@org.springframework.context.annotation.Configuration
+	 * Overrides the rendering beans to use a test-owned temp directory
+	 * for temp file creation. The directory is created at bean
+	 * initialization and deleted when the context is closed.
+	 */
+	@TestConfiguration
 	static class TestRenderConfig {
+
+		private Path testTempDir;
+
+		@Bean
+		@Primary
+		TempFileFactory testTempFileFactory() throws java.io.IOException {
+			this.testTempDir = Files.createTempDirectory("pos-doc-e2e-render-");
+			return TempFileFactory.inDirectory(this.testTempDir);
+		}
 
 		@Bean
 		@Primary
 		PdfFirstPageRenderer pdfFirstPageRenderer(
-				horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties properties) {
-			return new PdfFirstPageRenderer(properties,
-					TempFileFactory.inDirectory(renderTempDir));
+				horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties properties,
+				TempFileFactory testTempFileFactory) {
+			return new PdfFirstPageRenderer(properties, testTempFileFactory);
 		}
 
 		@Bean
 		@Primary
 		StoredPdfMaterializer storedPdfMaterializer(
 				horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage storage,
-				horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties properties) {
-			return new StoredPdfMaterializer(storage, properties,
-					TempFileFactory.inDirectory(renderTempDir));
+				horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties properties,
+				TempFileFactory testTempFileFactory) {
+			return new StoredPdfMaterializer(storage, properties, testTempFileFactory);
+		}
+
+		@jakarta.annotation.PreDestroy
+		void cleanup() {
+			if (this.testTempDir != null) {
+				try (var stream = Files.list(this.testTempDir)) {
+					stream.forEach(p -> {
+						try {
+							Files.deleteIfExists(p);
+						}
+						catch (java.io.IOException ignored) {
+						}
+					});
+				}
+				catch (java.io.IOException ignored) {
+				}
+				try {
+					Files.deleteIfExists(this.testTempDir);
+				}
+				catch (java.io.IOException ignored) {
+				}
+			}
 		}
 
 	}
