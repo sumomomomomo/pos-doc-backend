@@ -501,7 +501,7 @@ esac
 # volume, since the backend runtime image contains the JRE and curl but
 # not the sqlite3 CLI.
 sqlite_query() {
-    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+    docker run --rm \
         -v "${STACK_ID}_sqlite-data:/db:ro" \
         alpine:3.20 sh -c "apk add --no-cache sqlite >/dev/null 2>&1; sqlite3 /db/pos-doc.db \"$1\""
 }
