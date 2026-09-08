@@ -673,7 +673,7 @@ echo "duplicate: ACK'd as no-op; document count unchanged"
 
 # Verify the OCR request count remains 2 after duplicate delivery.
 OCR_REQUEST_COUNT_AFTER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --show-error --request POST --header "Content-Type: application/json" --data "{\"method\":\"POST\",\"url\":\"/v1/chat/completions\"}" http://ocr-stub:8080/__admin/requests/count 2>/dev/null | grep -o "\"count\":[0-9]*" | grep -o "[0-9]*" || echo 0')"
+    sh -c 'curl --silent --show-error --request POST --header "Content-Type: application/json" --data "{\"urlPattern\":\"/v1/chat/completions\"}" http://ocr-stub:8080/__admin/requests/count 2>/dev/null | grep -o "\"count\":[0-9]*" | grep -o "[0-9]*" || echo 0')"
 if [ "${OCR_REQUEST_COUNT_AFTER}" != "2" ]; then
     echo "ERROR: expected 2 OCR requests after duplicate delivery, got ${OCR_REQUEST_COUNT_AFTER}." >&2
     exit 1
@@ -699,7 +699,7 @@ echo "== OCR request count via WireMock request-count endpoint =="
 # number of matching requests. This is more reliable than parsing the
 # request journal JSON, which may return all requests on a single line.
 OCR_REQUEST_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --show-error --request POST --header "Content-Type: application/json" --data "{\"method\":\"POST\",\"url\":\"/v1/chat/completions\"}" http://ocr-stub:8080/__admin/requests/count 2>/dev/null | grep -o "\"count\":[0-9]*" | grep -o "[0-9]*" || echo 0')"
+    sh -c 'curl --silent --show-error --request POST --header "Content-Type: application/json" --data "{\"urlPattern\":\"/v1/chat/completions\"}" http://ocr-stub:8080/__admin/requests/count 2>/dev/null | grep -o "\"count\":[0-9]*" | grep -o "[0-9]*" || echo 0')"
 if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
     echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
     exit 1
