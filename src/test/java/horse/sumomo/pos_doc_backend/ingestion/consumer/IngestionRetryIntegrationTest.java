@@ -2,6 +2,8 @@ package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -295,9 +297,11 @@ class IngestionRetryIntegrationTest {
 		Integer beforeDocCount = this.jdbc.queryForObject(
 				"SELECT count(*) FROM pos_document WHERE pos_record_id = ?", Integer.class, posRecordId.toString());
 
-		// Record the DLQ depth before sending so we can detect the
-		// exact increment caused by this message.
+		// Record the DLQ depth and OCR request count before sending so we
+		// can detect the exact increment caused by this message.
 		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
+		long ocrBefore = ocrStub.getRequestCount();
 
 		// Send a malformed body referencing the real job/record IDs
 		// in the AMQP headers. The validator rejects the body before
@@ -317,9 +321,12 @@ class IngestionRetryIntegrationTest {
 		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
 				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) == dlqBefore + 1L);
 
-		// Give the listener a moment to attempt any DB mutation
-		// (it should not do any).
-		Thread.sleep(2000L);
+		// DLQ arrival proves the listener has finished handling the message.
+		// Assert no OCR request was made.
+		assertEquals(ocrBefore, ocrStub.getRequestCount(),
+				"malformed message must not trigger any OCR request");
+		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()),
+				"main queue must return to baseline");
 
 		// The real job/record must be completely unchanged.
 		String afterJobStatus = this.jdbc.queryForObject(
@@ -347,6 +354,222 @@ class IngestionRetryIntegrationTest {
 		assertEquals(beforeRecordStatus, afterRecordStatus, "record status must be unchanged");
 		assertEquals(beforeRecordVersion, afterRecordVersion, "record version must be unchanged");
 		assertEquals(beforeDocCount, afterDocCount, "document count must be unchanged");
+	}
+
+	@Test
+	@Order(4)
+	void ocr503ThenSuccessRetriesThroughRealBrokerAndCompletes() throws Exception {
+		transientFailuresRemaining.set(0);
+		ocrStub.resetResponses();
+
+		UUID posRecordId = UUID.randomUUID();
+		UUID jobId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
+		prepareJob(posRecordId, jobId, occurredAt);
+
+		// Queue: 503 (first doc fails), then two 200s for both docs on retry.
+		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
+		ocrStub.enqueueResponse("OCR FIRST", 200, "application/json");
+		ocrStub.enqueueResponse("OCR SECOND", 200, "application/json");
+
+		long ocrBefore = ocrStub.getRequestCount();
+		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
+
+		send(jobId, posRecordId, eventId, occurredAt);
+
+		awaitTerminalJob(jobId);
+		assertEquals("COMPLETED", jobStatus(jobId));
+		assertEquals(2, jobAttemptCount(jobId), "attempt_count must be 2 after one retry");
+		assertEquals("REVIEW_REQUIRED", recordStatus(posRecordId));
+		assertEquals(2, documentCount(posRecordId));
+		assertEquals(2, completedDocumentCount(posRecordId));
+		assertEquals(2, ocrResultCount(posRecordId, 1));
+		assertEquals(3, ocrStub.getRequestCount() - ocrBefore, "OCR delta must be 3 (1 fail + 2 success)");
+		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
+		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()), "no DLQ message expected");
+	}
+
+	@Test
+	@Order(5)
+	void ocr503ExhaustionFailsJobAndDeadLettersOnce() throws Exception {
+		transientFailuresRemaining.set(0);
+		ocrStub.resetResponses();
+
+		UUID posRecordId = UUID.randomUUID();
+		UUID jobId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
+		prepareJob(posRecordId, jobId, occurredAt);
+
+		// Queue three 503s so all three attempts fail on the first document.
+		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
+		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
+		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
+
+		long ocrBefore = ocrStub.getRequestCount();
+		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
+
+		send(jobId, posRecordId, eventId, occurredAt);
+
+		awaitTerminalJob(jobId);
+		assertEquals("FAILED", jobStatus(jobId));
+		assertEquals(3, jobAttemptCount(jobId), "attempt_count must reach max-attempts=3");
+		assertEquals("FAILED", recordStatus(posRecordId));
+		assertEquals(3, ocrStub.getRequestCount() - ocrBefore, "OCR delta must be 3 (one per attempt)");
+		assertEquals(0, ocrResultCount(posRecordId, 1), "no OCR results should be persisted");
+		assertEquals(0, completedDocumentCount(posRecordId));
+		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
+		assertEquals(dlqBefore + 1, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
+				"exactly one DLQ message expected");
+
+		// Error fields must use stable non-PII classification.
+		String errorCode = this.jdbc.queryForObject(
+				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		assertNotNull(errorCode, "error_code must be set on terminal failure");
+		String errorMsg = this.jdbc.queryForObject(
+				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		if (errorMsg != null) {
+			assertFalse(errorMsg.contains("SYNTHETIC OCR TEXT"),
+					"error_message must not contain OCR text");
+		}
+	}
+
+	@Test
+	@Order(6)
+	void ocr400IsNotRetriedAndIsDeadLettered() throws Exception {
+		transientFailuresRemaining.set(0);
+		ocrStub.resetResponses();
+
+		UUID posRecordId = UUID.randomUUID();
+		UUID jobId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
+		prepareJob(posRecordId, jobId, occurredAt);
+
+		// Queue: 400 (non-retryable), then a 200 tripwire that must NOT be consumed.
+		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 400, "application/json");
+		ocrStub.enqueueResponse("TRIPWIRE SHOULD NOT BE USED", 200, "application/json");
+
+		long ocrBefore = ocrStub.getRequestCount();
+		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
+
+		send(jobId, posRecordId, eventId, occurredAt);
+
+		awaitTerminalJob(jobId);
+		assertEquals("FAILED", jobStatus(jobId));
+		assertEquals(1, jobAttemptCount(jobId), "non-retryable failure must not retry");
+		assertEquals("FAILED", recordStatus(posRecordId));
+		assertEquals(1, ocrStub.getRequestCount() - ocrBefore,
+				"OCR delta must be 1 (tripwire response must remain unconsumed)");
+		assertEquals(0, ocrResultCount(posRecordId, 1));
+		assertEquals(0, completedDocumentCount(posRecordId));
+		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
+		assertEquals(dlqBefore + 1, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
+				"exactly one DLQ message expected");
+	}
+
+	@Test
+	@Order(7)
+	void retryAfterSecondDocumentFailureDoesNotReOcrFirstDocument() throws Exception {
+		transientFailuresRemaining.set(0);
+		ocrStub.resetResponses();
+
+		UUID posRecordId = UUID.randomUUID();
+		UUID jobId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
+		prepareJob(posRecordId, jobId, occurredAt);
+
+		// Queue: 200 (doc 1 succeeds), 503 (doc 2 fails), 200 (doc 2 retry succeeds).
+		// Doc 1 must NOT be re-OCRed on attempt 2.
+		ocrStub.enqueueResponse("OCR DOCUMENT ONE", 200, "application/json");
+		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
+		ocrStub.enqueueResponse("OCR DOCUMENT TWO", 200, "application/json");
+
+		long ocrBefore = ocrStub.getRequestCount();
+		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
+
+		send(jobId, posRecordId, eventId, occurredAt);
+
+		awaitTerminalJob(jobId);
+		assertEquals("COMPLETED", jobStatus(jobId));
+		assertEquals(2, jobAttemptCount(jobId));
+		assertEquals("REVIEW_REQUIRED", recordStatus(posRecordId));
+		assertEquals(2, documentCount(posRecordId));
+		assertEquals(2, completedDocumentCount(posRecordId));
+		assertEquals(2, ocrResultCount(posRecordId, 1));
+		// Delta must be 3, not 4: doc 1 is NOT re-OCRed on attempt 2.
+		assertEquals(3, ocrStub.getRequestCount() - ocrBefore,
+				"OCR delta must be 3 (doc1 + doc2-fail + doc2-retry), not 4");
+
+		// Verify both documents have exactly one version-1 OCR result each.
+		// The OCR delta of 3 (not 4) proves document 1 was not re-OCRed.
+		Integer resultCount = this.jdbc.queryForObject(
+				"SELECT count(*) FROM document_ocr_result r "
+						+ "JOIN pos_document d ON d.id = r.document_id "
+						+ "WHERE d.pos_record_id = ? AND r.prompt_version = 1",
+				Integer.class, posRecordId.toString());
+		assertEquals(2, resultCount, "exactly two version-1 OCR results expected");
+
+		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
+		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()));
+	}
+
+	// --- helper methods for OCR retry tests -----------------------------------
+
+	private long ocrRequestCount() {
+		return ocrStub.getRequestCount();
+	}
+
+	private String jobStatus(UUID jobId) {
+		return this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
+				jobId.toString());
+	}
+
+	private int jobAttemptCount(UUID jobId) {
+		Integer count = this.jdbc.queryForObject("SELECT attempt_count FROM ingestion_job WHERE id = ?",
+				Integer.class, jobId.toString());
+		return count != null ? count : 0;
+	}
+
+	private String recordStatus(UUID posRecordId) {
+		return this.jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?", String.class,
+				posRecordId.toString());
+	}
+
+	private int documentCount(UUID posRecordId) {
+		Integer count = this.jdbc.queryForObject(
+				"SELECT count(*) FROM pos_document WHERE pos_record_id = ?", Integer.class,
+				posRecordId.toString());
+		return count != null ? count : 0;
+	}
+
+	private int completedDocumentCount(UUID posRecordId) {
+		Integer count = this.jdbc.queryForObject(
+				"SELECT count(*) FROM pos_document WHERE pos_record_id = ? AND processing_status = 'COMPLETED'",
+				Integer.class, posRecordId.toString());
+		return count != null ? count : 0;
+	}
+
+	private int ocrResultCount(UUID posRecordId, int promptVersion) {
+		Integer count = this.jdbc.queryForObject(
+				"SELECT count(*) FROM document_ocr_result r "
+						+ "JOIN pos_document d ON d.id = r.document_id "
+						+ "WHERE d.pos_record_id = ? AND r.prompt_version = ?",
+				Integer.class, posRecordId.toString(), promptVersion);
+		return count != null ? count : 0;
+	}
+
+	private void awaitTerminalJob(UUID jobId) {
+		await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(250)).until(() -> {
+			String s = jobStatus(jobId);
+			return "COMPLETED".equals(s) || "FAILED".equals(s);
+		});
 	}
 
 	private void prepareJob(UUID posRecordId, UUID jobId, Instant occurredAt) throws Exception {

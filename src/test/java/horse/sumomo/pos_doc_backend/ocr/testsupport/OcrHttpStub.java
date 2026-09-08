@@ -121,6 +121,18 @@ public final class OcrHttpStub implements AutoCloseable {
 		this.responseQueue.add(new QueuedResponse(json, status, contentType));
 	}
 
+	/**
+	 * Clears all queued responses and resets the default response to the
+	 * original successful synthetic response. Does not stop or recreate
+	 * the HTTP server. Thread-safe.
+	 */
+	public synchronized void resetResponses() {
+		this.responseQueue.clear();
+		this.nextResponseJson = buildResponse(SYNTHETIC_OCR_TEXT);
+		this.nextResponseStatus = 200;
+		this.nextResponseContentType = "application/json";
+	}
+
 	@Override
 	public void close() throws IOException {
 		this.running = false;
