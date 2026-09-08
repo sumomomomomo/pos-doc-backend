@@ -50,6 +50,7 @@ public class PdfFirstPageRenderer {
 
 	private final FirstPageRenderingProperties properties;
 	private final Semaphore renderPermit;
+	private final TempFileFactory tempFileFactory;
 
 	/**
 	 * Optional test hook invoked after the permit is acquired and before
@@ -68,8 +69,13 @@ public class PdfFirstPageRenderer {
 	Runnable onBeforePermitAcquire;
 
 	public PdfFirstPageRenderer(FirstPageRenderingProperties properties) {
+		this(properties, TempFileFactory.systemDefault());
+	}
+
+	public PdfFirstPageRenderer(FirstPageRenderingProperties properties, TempFileFactory tempFileFactory) {
 		this.properties = properties;
 		this.renderPermit = new Semaphore(properties.maxConcurrentRenders(), true);
+		this.tempFileFactory = tempFileFactory;
 	}
 
 	/**
@@ -209,7 +215,7 @@ public class PdfFirstPageRenderer {
 			// Write PNG to a unique PII-free temporary file through
 			// BoundedOutputStream capped at max-png-bytes.
 			try {
-				pngPath = Files.createTempFile(PNG_TEMP_PREFIX, PNG_TEMP_SUFFIX);
+				pngPath = this.tempFileFactory.createTempFile(PNG_TEMP_PREFIX, PNG_TEMP_SUFFIX);
 			}
 			catch (IOException e) {
 				throw new RenderingException(RenderingException.Code.TEMP_STORAGE_UNAVAILABLE, e);

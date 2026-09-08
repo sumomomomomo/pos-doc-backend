@@ -21,12 +21,16 @@ import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -42,6 +46,9 @@ import horse.sumomo.pos_doc_backend.ingestion.api.RabbitTopologyProperties;
 import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessage;
 import horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
+import horse.sumomo.pos_doc_backend.rendering.service.PdfFirstPageRenderer;
+import horse.sumomo.pos_doc_backend.rendering.service.StoredPdfMaterializer;
+import horse.sumomo.pos_doc_backend.rendering.service.TempFileFactory;
 import horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -89,6 +96,9 @@ class DocumentOcrEndToEndIntegrationTest {
 	private static RabbitMQContainer rabbit;
 	private static MinioClient adminClient;
 	private static OcrHttpStub ocrStub;
+
+	@TempDir
+	static Path renderTempDir;
 
 	@Autowired
 	private RabbitTemplate rabbitTemplate;
@@ -160,12 +170,9 @@ class DocumentOcrEndToEndIntegrationTest {
 
 	@Test
 	void endToEndOcrWorkflowCompletesAllDocumentsAndJob() throws Exception {
-		// Use a unique test-owned temp directory for rendered PNG files.
-		// This isolates the test from other test classes that may also
-		// create temp files in the shared java.io.tmpdir.
-		Path testTempDir = Files.createTempDirectory("pos-doc-e2e-render-");
-		String originalTmpDir = System.getProperty("java.io.tmpdir");
-		System.setProperty("java.io.tmpdir", testTempDir.toString());
+		// The test-owned render temp directory is injected via
+		// @TestConfiguration (see TestRenderConfig below). We assert
+		// it is empty after the workflow completes.
 
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
@@ -276,30 +283,15 @@ class DocumentOcrEndToEndIntegrationTest {
 				"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1", Integer.class),
 				"Redelivery must create no duplicate OCR results");
 
-		// 9. No temporary rendered PNG remains in the test-owned temp
+		// 9. No temporary rendered files remain in the test-owned temp
 		//    directory after the workflow finishes. The PdfFirstPageRenderer
-		//    creates PNG temp files in java.io.tmpdir, which we set to a
-		//    unique test-owned directory at the start of this test.
-		try (var stream = Files.list(testTempDir)) {
+		//    and StoredPdfMaterializer use the injected TempFileFactory
+		//    (see TestRenderConfig) which writes to this @TempDir.
+		//    JUnit owns the @TempDir lifecycle (created before, deleted after).
+		try (var stream = Files.list(renderTempDir)) {
 			long fileCount = stream.count();
 			assertEquals(0, fileCount,
 					"Test-owned render temp directory must be empty after processing");
-		}
-		finally {
-			// Restore the original temp directory and clean up.
-			System.setProperty("java.io.tmpdir", originalTmpDir);
-			try (var stream = Files.list(testTempDir)) {
-				stream.forEach(p -> {
-					try {
-						Files.deleteIfExists(p);
-					}
-					catch (IOException ignored) {
-					}
-				});
-			}
-			catch (IOException ignored) {
-			}
-			Files.deleteIfExists(testTempDir);
 		}
 	}
 
@@ -394,6 +386,33 @@ class DocumentOcrEndToEndIntegrationTest {
 			}
 		}
 		return baos.toByteArray();
+	}
+
+	/**
+		* Overrides the rendering beans to use a test-owned temp directory
+		* for temp file creation. The @TempDir field is managed by JUnit
+		* (created before the test class, deleted after).
+		*/
+	@TestConfiguration
+	static class TestRenderConfig {
+
+		@Bean
+		@Primary
+		PdfFirstPageRenderer pdfFirstPageRenderer(
+				horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties properties) {
+			return new PdfFirstPageRenderer(properties,
+					TempFileFactory.inDirectory(renderTempDir));
+		}
+
+		@Bean
+		@Primary
+		StoredPdfMaterializer storedPdfMaterializer(
+				horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage storage,
+				horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties properties) {
+			return new StoredPdfMaterializer(storage, properties,
+					TempFileFactory.inDirectory(renderTempDir));
+		}
+
 	}
 
 }

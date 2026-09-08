@@ -48,10 +48,17 @@ public class StoredPdfMaterializer {
 
 	private final MinioObjectStorage storage;
 	private final FirstPageRenderingProperties properties;
+	private final TempFileFactory tempFileFactory;
 
 	public StoredPdfMaterializer(MinioObjectStorage storage, FirstPageRenderingProperties properties) {
+		this(storage, properties, TempFileFactory.systemDefault());
+	}
+
+	public StoredPdfMaterializer(MinioObjectStorage storage, FirstPageRenderingProperties properties,
+			TempFileFactory tempFileFactory) {
 		this.storage = Objects.requireNonNull(storage, "storage must not be null");
 		this.properties = Objects.requireNonNull(properties, "properties must not be null");
+		this.tempFileFactory = Objects.requireNonNull(tempFileFactory, "tempFileFactory must not be null");
 	}
 
 	/**
@@ -136,7 +143,7 @@ public class StoredPdfMaterializer {
 	 * overridable so tests can capture the path at creation time.
 	 */
 	Path createTempFile() throws IOException {
-		return Files.createTempFile(TEMP_PREFIX, TEMP_SUFFIX);
+		return this.tempFileFactory.createTempFile(TEMP_PREFIX, TEMP_SUFFIX);
 	}
 
 	private InputStream openStream(String objectKey) {
