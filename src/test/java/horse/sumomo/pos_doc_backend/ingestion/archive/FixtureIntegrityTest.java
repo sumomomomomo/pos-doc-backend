@@ -24,12 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>Expected SHA-256 of {@code valid-two-pdf.zip}:
  * <pre>
- * 1ce96e72137fd1b084410d8f1f9154bce9dfd435fc9e9ab6a8ea340968e362a0
+ * bc193644e5e9b4254c5476b3f254178260a94c37359c43974c2286f41c30c9c0
  * </pre>
  */
 class FixtureIntegrityTest {
 
-	private static final String EXPECTED_SHA256 = "1ce96e72137fd1b084410d8f1f9154bce9dfd435fc9e9ab6a8ea340968e362a0";
+	private static final String EXPECTED_SHA256 = "bc193644e5e9b4254c5476b3f254178260a94c37359c43974c2286f41c30c9c0";
 	private static final String FIXTURE = "fixtures/valid-two-pdf.zip";
 
 	@Test

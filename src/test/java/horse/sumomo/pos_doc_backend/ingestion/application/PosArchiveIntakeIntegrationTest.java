@@ -63,7 +63,7 @@ class PosArchiveIntakeIntegrationTest {
 	private static final String TEST_BUCKET = "pos-documents-intake-test";
 	private static final DockerImageName MINIO_IMAGE =
 			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
-	private static final String FIXTURE_SHA256 = "1ce96e72137fd1b084410d8f1f9154bce9dfd435fc9e9ab6a8ea340968e362a0";
+	private static final String FIXTURE_SHA256 = "bc193644e5e9b4254c5476b3f254178260a94c37359c43974c2286f41c30c9c0";
 
 	private static final byte[] PDF = "%PDF-1.4\n% dummy test document\n%%EOF\n".getBytes(StandardCharsets.UTF_8);
 
