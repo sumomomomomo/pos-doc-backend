@@ -125,7 +125,7 @@ ocr_request_count() {
             --header "Content-Type: application/json" \
             --data '{"method":"POST","urlPath":"/v1/chat/completions"}' \
             http://ocr-stub:8080/__admin/requests/count)"
-    printf '%s' "${response}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])'
+    printf '%s' "${response}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])' | tr -d '[:space:]'
 }
 
 # --- 1: validate compose configuration ---------------------------------------
