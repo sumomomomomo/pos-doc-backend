@@ -136,19 +136,10 @@ public class DocumentOcrPersistenceService {
 	@Transactional
 	public void persistOcrResult(UUID documentId, int promptVersion, String ocrText, String model,
 			String finishReason, Instant completedAt) {
-		// Check for an existing result first (idempotency).
-		Optional<DocumentOcrResultEntity> existing = this.ocrResultRepository
-				.findByDocumentIdAndPromptVersion(documentId, promptVersion);
-		if (existing.isPresent()) {
-			reconcileExistingResult(existing.get(), ocrText, model, finishReason, documentId, promptVersion);
-			return;
-		}
-
-		// Use a native SQLite upsert to handle the concurrent-insert race
-		// safely. INSERT ... ON CONFLICT DO NOTHING returns 0 affected rows
-		// if the row already exists (another transaction committed first),
-		// and 1 if the insert succeeded. This avoids the JPA flush failure
-		// / rollback-only problem that would occur with saveAndFlush + catch.
+		// Always execute the native SQLite upsert. INSERT ... ON CONFLICT
+		// DO NOTHING returns 1 affected row if the insert succeeded, or 0
+		// if a row already exists (idempotent re-delivery or concurrent
+		// insert). This eliminates the find-before-insert TOCTOU window.
 		int affected = this.jdbcTemplate.update(
 				"INSERT INTO document_ocr_result (document_id, prompt_version, ocr_text, model, "
 						+ "finish_reason, character_count, completed_at) "
@@ -158,9 +149,10 @@ public class DocumentOcrPersistenceService {
 				ocrText.length(), completedAt.toEpochMilli());
 
 		if (affected == 0) {
-			// Concurrent-insert race: another transaction committed a row
-			// for the same (document_id, prompt_version) between our check
-			// and our insert. Re-read and reconcile.
+			// A row already exists for this (document_id, prompt_version).
+			// This is the idempotent re-delivery path: re-read the committed
+			// row and reconcile it into either idempotent success or a
+			// stable conflict.
 			Optional<DocumentOcrResultEntity> committed = this.ocrResultRepository
 					.findByDocumentIdAndPromptVersion(documentId, promptVersion);
 			if (committed.isPresent()) {

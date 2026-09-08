@@ -1,14 +1,21 @@
 package horse.sumomo.pos_doc_backend.ingestion.archive;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,6 +47,35 @@ class FixtureIntegrityTest {
 			assertEquals(EXPECTED_SHA256, actual,
 					"the committed fixture has been altered; regenerate with scripts/make-fixture.py and review the diff");
 			assertTrue(actual.length() == 64, "a SHA-256 hex digest is 64 characters");
+		}
+	}
+
+	@Test
+	void fixtureContainsTwoRenderablePdfs() throws Exception {
+		try (InputStream in = FixtureIntegrityTest.class.getClassLoader().getResourceAsStream(FIXTURE)) {
+			assertNotNull(in, "the committed fixture must be on the test classpath: " + FIXTURE);
+			try (ZipInputStream zis = new ZipInputStream(in)) {
+				ZipEntry entry;
+				int count = 0;
+				while ((entry = zis.getNextEntry()) != null) {
+					assertTrue(entry.getName().startsWith("documents/"),
+							"unexpected ZIP entry: " + entry.getName());
+					byte[] pdfBytes = zis.readAllBytes();
+					try (PDDocument doc = org.apache.pdfbox.Loader.loadPDF(pdfBytes)) {
+						assertFalse(doc.isEncrypted(),
+								"fixture PDF must not be encrypted: " + entry.getName());
+						assertTrue(doc.getNumberOfPages() >= 1,
+								"fixture PDF must have at least one page: " + entry.getName());
+						PDFRenderer renderer = new PDFRenderer(doc);
+						BufferedImage image = renderer.renderImage(0);
+						assertNotNull(image, "page 0 must render to an image: " + entry.getName());
+						assertTrue(image.getWidth() > 0 && image.getHeight() > 0,
+								"rendered image must have non-zero dimensions: " + entry.getName());
+					}
+					count++;
+				}
+				assertEquals(2, count, "fixture must contain exactly two PDF entries");
+			}
 		}
 	}
 
