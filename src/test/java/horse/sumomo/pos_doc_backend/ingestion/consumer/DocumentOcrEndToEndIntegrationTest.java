@@ -283,17 +283,18 @@ class DocumentOcrEndToEndIntegrationTest {
 
 		// 9. No temporary rendered PNG remains after the workflow finishes.
 		// The PdfFirstPageRenderer creates PNG temp files with prefix
-		// "pos-doc-render-png-" and suffix ".png.part" in the system temp
-		// directory. The RenderedFirstPage handle is closed via
-		// try-with-resources, which deletes the file. We verify by
-		// checking that no such files remain in the system temp directory.
+		// "pos-doc-render-png-" and suffix ".png.part" in the directory
+		// specified by java.io.tmpdir. We assert that no such files remain
+		// in the JVM temp directory after the workflow completes.
+		// The RenderedFirstPage handle is closed via try-with-resources,
+		// which deletes the file.
 		String pngTempDir = System.getProperty("java.io.tmpdir");
 		try (var stream = Files.list(Path.of(pngTempDir))) {
 			long pngCount = stream
 					.filter(p -> p.getFileName().toString().startsWith("pos-doc-render-png-"))
 					.count();
 			assertEquals(0, pngCount,
-					"No rendered PNG temp files must remain in the system temp directory");
+					"No rendered PNG temp files must remain after processing");
 		}
 	}
 
