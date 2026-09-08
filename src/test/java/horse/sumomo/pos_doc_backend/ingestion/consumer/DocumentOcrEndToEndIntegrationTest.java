@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -159,18 +160,12 @@ class DocumentOcrEndToEndIntegrationTest {
 
 	@Test
 	void endToEndOcrWorkflowCompletesAllDocumentsAndJob() throws Exception {
-		// Clean up any leftover PNG temp files from previous test runs.
-		String tempDir = System.getProperty("java.io.tmpdir");
-		try (var stream = Files.list(Path.of(tempDir))) {
-			stream.filter(p -> p.getFileName().toString().startsWith("pos-doc-render-png-"))
-					.forEach(p -> {
-						try {
-							Files.deleteIfExists(p);
-						}
-						catch (Exception ignored) {
-						}
-					});
-		}
+		// Use a unique test-owned temp directory for rendered PNG files.
+		// This isolates the test from other test classes that may also
+		// create temp files in the shared java.io.tmpdir.
+		Path testTempDir = Files.createTempDirectory("pos-doc-e2e-render-");
+		String originalTmpDir = System.getProperty("java.io.tmpdir");
+		System.setProperty("java.io.tmpdir", testTempDir.toString());
 
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
@@ -281,20 +276,30 @@ class DocumentOcrEndToEndIntegrationTest {
 				"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1", Integer.class),
 				"Redelivery must create no duplicate OCR results");
 
-		// 9. No temporary rendered PNG remains after the workflow finishes.
-		// The PdfFirstPageRenderer creates PNG temp files with prefix
-		// "pos-doc-render-png-" and suffix ".png.part" in the directory
-		// specified by java.io.tmpdir. We assert that no such files remain
-		// in the JVM temp directory after the workflow completes.
-		// The RenderedFirstPage handle is closed via try-with-resources,
-		// which deletes the file.
-		String pngTempDir = System.getProperty("java.io.tmpdir");
-		try (var stream = Files.list(Path.of(pngTempDir))) {
-			long pngCount = stream
-					.filter(p -> p.getFileName().toString().startsWith("pos-doc-render-png-"))
-					.count();
-			assertEquals(0, pngCount,
-					"No rendered PNG temp files must remain after processing");
+		// 9. No temporary rendered PNG remains in the test-owned temp
+		//    directory after the workflow finishes. The PdfFirstPageRenderer
+		//    creates PNG temp files in java.io.tmpdir, which we set to a
+		//    unique test-owned directory at the start of this test.
+		try (var stream = Files.list(testTempDir)) {
+			long fileCount = stream.count();
+			assertEquals(0, fileCount,
+					"Test-owned render temp directory must be empty after processing");
+		}
+		finally {
+			// Restore the original temp directory and clean up.
+			System.setProperty("java.io.tmpdir", originalTmpDir);
+			try (var stream = Files.list(testTempDir)) {
+				stream.forEach(p -> {
+					try {
+						Files.deleteIfExists(p);
+					}
+					catch (IOException ignored) {
+					}
+				});
+			}
+			catch (IOException ignored) {
+			}
+			Files.deleteIfExists(testTempDir);
 		}
 	}
 
