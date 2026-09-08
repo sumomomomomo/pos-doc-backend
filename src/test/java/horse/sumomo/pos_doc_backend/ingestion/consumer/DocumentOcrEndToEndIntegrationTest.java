@@ -83,6 +83,7 @@ import tools.jackson.databind.json.JsonMapper;
 		"app.ingestion.consumer.enabled=true"
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+@org.springframework.context.annotation.Import(DocumentOcrEndToEndIntegrationTest.TestRenderConfig.class)
 class DocumentOcrEndToEndIntegrationTest {
 
 	private static final String TEST_BUCKET = "pos-documents-ocr-e2e-test";
@@ -393,7 +394,7 @@ class DocumentOcrEndToEndIntegrationTest {
 		* for temp file creation. The @TempDir field is managed by JUnit
 		* (created before the test class, deleted after).
 		*/
-	@TestConfiguration
+	@org.springframework.context.annotation.Configuration
 	static class TestRenderConfig {
 
 		@Bean
