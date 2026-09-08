@@ -669,19 +669,21 @@ fi
 echo "pos_record: REVIEW_REQUIRED"
 
 echo "== MinIO still contains the original ZIP and extracted PDFs =="
-MINIO_CHECK2="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T minio-init \
-    sh -c "mc alias set local http://minio:9000 \${MINIO_ROOT_USER} \${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; mc ls --recursive local/pos-documents/ 2>/dev/null | grep -c '\.pdf'")"
-if [ "${MINIO_CHECK2}" != "2" ]; then
-    echo "ERROR: expected 2 PDFs in MinIO, got ${MINIO_CHECK2}." >&2
+KEYS_BEFORE_DUP="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+    -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+    minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
+SRC_BEFORE_DUP="$(printf '%s' "${KEYS_BEFORE_DUP}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
+PDF_BEFORE_DUP="$(printf '%s' "${KEYS_BEFORE_DUP}" | grep -cE "documents/${POS_RECORD_ID}/[0-9a-f-]{36}\\.pdf$" || true)"
+if [ "${SRC_BEFORE_DUP}" != "1" ] || [ "${PDF_BEFORE_DUP}" != "2" ]; then
+    echo "ERROR: MinIO state before duplicate: src=${SRC_BEFORE_DUP} pdfs=${PDF_BEFORE_DUP} (expected 1/2)." >&2
     exit 1
 fi
 echo "minio: source archive and 2 PDFs still present after OCR"
 
 echo "== no PNG objects were created in MinIO =="
-PNG_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T minio-init \
-    sh -c "mc alias set local http://minio:9000 \${MINIO_ROOT_USER} \${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; mc ls --recursive local/pos-documents/ 2>/dev/null | grep -c '\.png' || true")"
-if [ "${PNG_COUNT}" != "0" ]; then
-    echo "ERROR: PNG objects found in MinIO (should be 0): ${PNG_COUNT}." >&2
+PNG_BEFORE_DUP="$(printf '%s' "${KEYS_BEFORE_DUP}" | grep -cE '\.png$' || true)"
+if [ "${PNG_BEFORE_DUP}" != "0" ]; then
+    echo "ERROR: ${PNG_BEFORE_DUP} PNG objects found in MinIO; no PNG objects should be created." >&2
     exit 1
 fi
 echo "minio: no PNG objects created"
