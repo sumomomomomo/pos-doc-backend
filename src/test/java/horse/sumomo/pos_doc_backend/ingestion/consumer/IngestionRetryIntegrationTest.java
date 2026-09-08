@@ -4,6 +4,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -387,8 +388,20 @@ class IngestionRetryIntegrationTest {
 		assertEquals(2, completedDocumentCount(posRecordId));
 		assertEquals(2, ocrResultCount(posRecordId, 1));
 		assertEquals(3, ocrStub.getRequestCount() - ocrBefore, "OCR delta must be 3 (1 fail + 2 success)");
-		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
-		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()), "no DLQ message expected");
+
+		// Await broker settlement: main queue back to baseline, DLQ unchanged.
+		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == mainBefore);
+		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
+				"no DLQ message expected");
+
+		// Error fields must be NULL on successful completion.
+		String errorCode = this.jdbc.queryForObject(
+				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		String errorMsg = this.jdbc.queryForObject(
+				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		assertNull(errorCode, "error_code must be NULL on COMPLETED job");
+		assertNull(errorMsg, "error_message must be NULL on COMPLETED job");
 	}
 
 	@Test
@@ -421,14 +434,20 @@ class IngestionRetryIntegrationTest {
 		assertEquals(3, ocrStub.getRequestCount() - ocrBefore, "OCR delta must be 3 (one per attempt)");
 		assertEquals(0, ocrResultCount(posRecordId, 1), "no OCR results should be persisted");
 		assertEquals(0, completedDocumentCount(posRecordId));
-		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
+
+		// Await broker settlement: DLQ must reach baseline+1, main queue back to baseline.
+		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) == dlqBefore + 1L);
+		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == mainBefore);
 		assertEquals(dlqBefore + 1, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
 				"exactly one DLQ message expected");
 
-		// Error fields must use stable non-PII classification.
+		// Exact stable error code for retryable OCR exhaustion.
 		String errorCode = this.jdbc.queryForObject(
 				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		assertNotNull(errorCode, "error_code must be set on terminal failure");
+		assertEquals("EXTRACTION_TRANSIENT_FAILURE", errorCode,
+				"retryable OCR exhaustion must use EXTRACTION_TRANSIENT_FAILURE");
 		String errorMsg = this.jdbc.queryForObject(
 				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
 		if (errorMsg != null) {
@@ -467,9 +486,28 @@ class IngestionRetryIntegrationTest {
 				"OCR delta must be 1 (tripwire response must remain unconsumed)");
 		assertEquals(0, ocrResultCount(posRecordId, 1));
 		assertEquals(0, completedDocumentCount(posRecordId));
-		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
+
+		// Await broker settlement.
+		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) == dlqBefore + 1L);
+		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == mainBefore);
 		assertEquals(dlqBefore + 1, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
 				"exactly one DLQ message expected");
+
+		// Exact stable error code for non-retryable OCR failure.
+		String errorCode = this.jdbc.queryForObject(
+				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		assertEquals("EXTRACTION_STATE_CONFLICT", errorCode,
+				"non-retryable OCR failure must use EXTRACTION_STATE_CONFLICT");
+		String errorMsg = this.jdbc.queryForObject(
+				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
+		if (errorMsg != null) {
+			assertFalse(errorMsg.contains("SYNTHETIC OCR TEXT"),
+					"error_message must not contain OCR text");
+			assertFalse(errorMsg.contains("TRIPWIRE SHOULD NOT BE USED"),
+					"error_message must not contain tripwire text");
+		}
 	}
 
 	@Test
@@ -516,15 +554,14 @@ class IngestionRetryIntegrationTest {
 				Integer.class, posRecordId.toString());
 		assertEquals(2, resultCount, "exactly two version-1 OCR results expected");
 
-		assertEquals(mainBefore, queueDepth(this.rabbitTemplate, topology.queue()));
-		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()));
+		// Await broker settlement.
+		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == mainBefore);
+		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
+				"no DLQ message expected");
 	}
 
 	// --- helper methods for OCR retry tests -----------------------------------
-
-	private long ocrRequestCount() {
-		return ocrStub.getRequestCount();
-	}
 
 	private String jobStatus(UUID jobId) {
 		return this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
