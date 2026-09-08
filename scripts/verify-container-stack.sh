@@ -112,6 +112,22 @@ wait_for_url() {
     return 1
 }
 
+# --- helper: count OCR requests via WireMock admin API ------------------------
+# Uses POST /__admin/requests/count with urlPath filter. The curl runs
+# inside the backend container (which has curl); the JSON is parsed on
+# the host with python3.
+ocr_request_count() {
+    local response
+    response="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" \
+        -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+        curl --fail --silent --show-error \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --data '{"method":"POST","urlPath":"/v1/chat/completions"}' \
+            http://ocr-stub:8080/__admin/requests/count)"
+    printf '%s' "${response}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])'
+}
+
 # --- 1: validate compose configuration ---------------------------------------
 
 # Ensure a clean slate: tear down any leftover stack from a previous run.
@@ -675,8 +691,7 @@ fi
 echo "duplicate: ACK'd as no-op; document count unchanged"
 
 # Verify the OCR request count remains 2 after duplicate delivery.
-OCR_REQUEST_COUNT_AFTER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --show-error http://ocr-stub:8080/__admin/requests 2>/dev/null | grep -c "\"url\":\"/v1/chat/completions\"" || echo 0')"
+OCR_REQUEST_COUNT_AFTER="$(ocr_request_count)"
 if [ "${OCR_REQUEST_COUNT_AFTER}" != "2" ]; then
     echo "ERROR: expected 2 OCR requests after duplicate delivery, got ${OCR_REQUEST_COUNT_AFTER}." >&2
     exit 1
@@ -698,11 +713,7 @@ fi
 echo "ocr-stub: WireMock healthy (HTTP 200 from /__admin/mappings)"
 
 echo "== OCR request count via WireMock request-count endpoint =="
-# Use WireMock's POST /__admin/requests/count endpoint to get the exact
-# number of matching requests. This is more reliable than parsing the
-# request journal JSON, which may return all requests on a single line.
-OCR_REQUEST_COUNT="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --show-error http://ocr-stub:8080/__admin/requests 2>/dev/null | grep -c "\"url\":\"/v1/chat/completions\"" || echo 0')"
+OCR_REQUEST_COUNT="$(ocr_request_count)"
 if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
     echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
     exit 1
