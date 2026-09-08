@@ -114,6 +114,9 @@ wait_for_url() {
 
 # --- 1: validate compose configuration ---------------------------------------
 
+# Ensure a clean slate: tear down any leftover stack from a previous run.
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
+
 echo "== compose config =="
 docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml config --quiet
 
