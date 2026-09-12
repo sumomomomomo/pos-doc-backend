@@ -8,31 +8,25 @@ import org.springframework.web.bind.annotation.RestController;
 import com.yourcompany.pos.api.IngestionJobsApi;
 import com.yourcompany.pos.api.model.IngestionJob;
 
-import horse.sumomo.pos_doc_backend.ingestion.application.IntakeException;
-import horse.sumomo.pos_doc_backend.ingestion.mapping.IngestionJobApiMapper;
-import horse.sumomo.pos_doc_backend.persistence.entity.IngestionJobEntity;
-import horse.sumomo.pos_doc_backend.persistence.repository.IngestionJobRepository;
+import horse.sumomo.pos_doc_backend.review.IngestionJobReadService;
 
 /**
- * Ingestion-job endpoint. Returns the persisted job so a client can observe
- * its {@code QUEUED} state after an accepted upload.
+ * Ingestion-job endpoint. Delegates to {@link IngestionJobReadService} so the
+ * repository access lives behind a read service; behavior (persisted job,
+ * sanitized 404) is unchanged.
  */
 @RestController
 public class IngestionJobsController implements IngestionJobsApi {
 
-	private final IngestionJobRepository ingestionJobRepository;
+	private final IngestionJobReadService ingestionJobReadService;
 
-	public IngestionJobsController(IngestionJobRepository ingestionJobRepository) {
-		this.ingestionJobRepository = ingestionJobRepository;
+	public IngestionJobsController(IngestionJobReadService ingestionJobReadService) {
+		this.ingestionJobReadService = ingestionJobReadService;
 	}
 
 	@Override
 	public ResponseEntity<IngestionJob> getIngestionJob(UUID jobId) {
-		// The active-record projection excludes jobs whose POS record is
-		// soft-deleted, matching the "does not exist" contract.
-		IngestionJobEntity entity = this.ingestionJobRepository.findByIdAndPosRecordDeletedAtIsNull(jobId)
-				.orElseThrow(() -> new IntakeException(IntakeException.Code.INGESTION_JOB_NOT_FOUND));
-		return ResponseEntity.ok(IngestionJobApiMapper.toDto(entity));
+		return ResponseEntity.ok(this.ingestionJobReadService.getJob(jobId));
 	}
 
 }

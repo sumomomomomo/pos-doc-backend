@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
@@ -17,25 +18,24 @@ import com.yourcompany.pos.api.model.PosRecordPatch;
 import com.yourcompany.pos.api.model.PosRecordSearchPage;
 import com.yourcompany.pos.api.model.PosRecordSearchRequest;
 import com.yourcompany.pos.api.model.UploadAccepted;
+import com.yourcompany.pos.api.model.VerifyPosRecordRequest;
 
 import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosDocumentListService;
 import horse.sumomo.pos_doc_backend.ingestion.application.UploadResult;
 import horse.sumomo.pos_doc_backend.ingestion.mapping.PosDocumentApiMapper;
-import horse.sumomo.pos_doc_backend.service.DummyPosRecordService;
+import horse.sumomo.pos_doc_backend.review.PosRecordCommandService;
+import horse.sumomo.pos_doc_backend.review.PosRecordReadService;
+import horse.sumomo.pos_doc_backend.review.PosRecordSearchService;
 
 /**
  * POS records endpoints.
  *
- * <p>{@link #uploadPosRecord} is real: it delegates to
- * {@link PosArchiveIntakeService} and returns {@code 202} with the persisted
- * identifiers. The remaining operations keep their Task 1 dummy behavior;
- * they are not yet persistence-backed.
- *
- * <p>TODO Task 6+: back {@code getPosRecord}, {@code searchPosRecords},
- * {@code updatePosRecord}, {@code deletePosRecord}, and
- * {@code listPosDocuments} with persistence; only the upload is real in
- * this task.
+ * <p>{@code uploadPosRecord} delegates to {@link PosArchiveIntakeService} and
+ * returns {@code 202}. The remaining operations are persistence-backed:
+ * search, detail read, metadata PATCH, verification, and soft delete are owned
+ * by the {@code review} application services; this controller only maps the
+ * generated interface onto them.
  */
 @RestController
 public class PosRecordsController implements PosRecordsApi {
@@ -44,7 +44,9 @@ public class PosRecordsController implements PosRecordsApi {
 
 	private final PosArchiveIntakeService intakeService;
 	private final PosDocumentListService documentListService;
-	private final DummyPosRecordService posRecordService;
+	private final PosRecordReadService readService;
+	private final PosRecordSearchService searchService;
+	private final PosRecordCommandService commandService;
 
 	/**
 	 * Servlet context path, used to build the external {@code Location}
@@ -54,11 +56,15 @@ public class PosRecordsController implements PosRecordsApi {
 
 	public PosRecordsController(PosArchiveIntakeService intakeService,
 			PosDocumentListService documentListService,
-			DummyPosRecordService posRecordService,
-			@org.springframework.beans.factory.annotation.Value("${server.servlet.context-path:/api/v1}") String contextPath) {
+			PosRecordReadService readService,
+			PosRecordSearchService searchService,
+			PosRecordCommandService commandService,
+			@Value("${server.servlet.context-path:/api/v1}") String contextPath) {
 		this.intakeService = intakeService;
 		this.documentListService = documentListService;
-		this.posRecordService = posRecordService;
+		this.readService = readService;
+		this.searchService = searchService;
+		this.commandService = commandService;
 		this.contextPath = contextPath;
 	}
 
@@ -76,21 +82,27 @@ public class PosRecordsController implements PosRecordsApi {
 
 	@Override
 	public ResponseEntity<PosRecordSearchPage> searchPosRecords(PosRecordSearchRequest posRecordSearchRequest) {
-		return ResponseEntity.ok(posRecordService.searchPage());
+		return ResponseEntity.ok(this.searchService.search(posRecordSearchRequest));
 	}
 
 	@Override
 	public ResponseEntity<PosRecord> getPosRecord(UUID posRecordId) {
-		return ResponseEntity.ok(posRecordService.posRecord(posRecordId));
+		return ResponseEntity.ok(this.readService.getRecord(posRecordId));
 	}
 
 	@Override
 	public ResponseEntity<PosRecord> updatePosRecord(UUID posRecordId, PosRecordPatch posRecordPatch) {
-		return ResponseEntity.ok(posRecordService.posRecord(posRecordId));
+		return ResponseEntity.ok(this.commandService.patch(posRecordId, posRecordPatch));
+	}
+
+	@Override
+	public ResponseEntity<PosRecord> verifyPosRecord(UUID posRecordId, VerifyPosRecordRequest verifyPosRecordRequest) {
+		return ResponseEntity.ok(this.commandService.verify(posRecordId, verifyPosRecordRequest));
 	}
 
 	@Override
 	public ResponseEntity<Void> deletePosRecord(UUID posRecordId) {
+		this.commandService.delete(posRecordId);
 		return ResponseEntity.noContent().build();
 	}
 

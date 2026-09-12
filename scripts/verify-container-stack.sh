@@ -128,6 +128,61 @@ ocr_request_count() {
     printf '%s' "${response}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])' | tr -d '[:space:]'
 }
 
+# --- helper: arbitrary HTTP call capturing status code + body -----------------
+# http_call METHOD URL [json-body] [content-type]
+# Sets the globals HTTP_CODE and HTTP_BODY. The body is written to a temp file
+# and removed before returning, so no temp files leak out of the function.
+http_call() {
+    _hc_method="$1"
+    _hc_url="$2"
+    _hc_data="${3:-}"
+    _hc_ctype="${4:-application/json}"
+    _hc_body_file="$(mktemp "pos-doc-task2-test-http.XXXXXX")"
+    _hc_code_file="$(mktemp "pos-doc-task2-test-code.XXXXXX")"
+    if [ -n "${_hc_data}" ]; then
+        curl --silent --max-time 15 --output "${_hc_body_file}" --write-out '%{http_code}' \
+            --request "${_hc_method}" \
+            --header "Content-Type: ${_hc_ctype}" \
+            --data "${_hc_data}" \
+            "${_hc_url}" > "${_hc_code_file}" 2>/dev/null || true
+    else
+        curl --silent --max-time 15 --output "${_hc_body_file}" --write-out '%{http_code}' \
+            --request "${_hc_method}" \
+            "${_hc_url}" > "${_hc_code_file}" 2>/dev/null || true
+    fi
+    HTTP_CODE="$(tr -d '[:space:]' < "${_hc_code_file}" 2>/dev/null || true)"
+    HTTP_BODY="$(cat "${_hc_body_file}" 2>/dev/null || true)"
+    rm -f "${_hc_body_file}" "${_hc_code_file}"
+}
+
+# --- helper: extract a non-negative integer JSON field from HTTP_BODY ---------
+json_int() {
+    printf '%s' "${HTTP_BODY}" | sed -n "s/.*\"${1}\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p"
+}
+
+# --- helper: poll a GET until it returns the expected HTTP code --------------
+# http_get_retry URL EXPECTED_CODE LABEL
+# Tolerates a transient no-response (curl 000) right after a cold backend start,
+# when the compose health check (actuator/health) has not yet exercised the DB.
+# On success HTTP_CODE/HTTP_BODY hold the final response and it returns 0; on
+# timeout it prints an error and returns 1.
+http_get_retry() {
+    _gr_url="$1"
+    _gr_expect="$2"
+    _gr_label="$3"
+    i=0
+    while [ "${i}" -lt 20 ]; do
+        http_call GET "${_gr_url}"
+        if [ "${HTTP_CODE}" = "${_gr_expect}" ]; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    echo "ERROR: ${_gr_label}: expected http ${_gr_expect}, last was ${HTTP_CODE}: ${HTTP_BODY}" >&2
+    return 1
+}
+
 # --- 1: validate compose configuration ---------------------------------------
 
 # Ensure a clean slate: tear down any leftover stack from a previous run.
@@ -161,15 +216,12 @@ case "${HEALTH}" in
     *) echo "ERROR: backend health does not report UP: ${HEALTH}" >&2; exit 1 ;;
 esac
 
-# --- 6: Task 1 dummy endpoint -------------------------------------------------
+# --- 6: POS-record detail 404 for unknown id -------------------------------------------------
 
-echo "== dummy pos-record endpoint =="
-DUMMY_RESPONSE="$(curl --fail --silent --show-error \
-    http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
-case "${DUMMY_RESPONSE}" in
-    *"11111111-1111-1111-1111-111111111111"*) echo "dummy endpoint: echoes fixed UUID" ;;
-    *) echo "ERROR: dummy endpoint did not echo the fixed UUID: ${DUMMY_RESPONSE}" >&2; exit 1 ;;
-esac
+echo "== detail 404 for unknown id =="
+http_get_retry "http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111" 404 "detail"
+printf '%s' "${HTTP_BODY}" | grep -q "POS_RECORD_NOT_FOUND" || { echo "ERROR: detail 404 missing POS_RECORD_NOT_FOUND: ${HTTP_BODY}" >&2; exit 1; }
+echo "detail: unknown id -> 404 POS_RECORD_NOT_FOUND"
 
 # --- 7: SQLite file exists inside the backend container -----------------------
 
@@ -228,15 +280,12 @@ if [ "${STATUS}" != "healthy" ]; then
 fi
 echo "backend: healthy after restart"
 
-echo "== re-check sqlite file and dummy endpoint =="
+echo "== re-check sqlite file and detail 404 =="
 docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
 echo "sqlite: still present after backend restart"
-DUMMY_RESPONSE="$(curl --fail --silent --show-error \
-    http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
-case "${DUMMY_RESPONSE}" in
-    *"11111111-1111-1111-1111-111111111111"*) echo "dummy endpoint: OK after backend restart" ;;
-    *) echo "ERROR: dummy endpoint failed after backend restart: ${DUMMY_RESPONSE}" >&2; exit 1 ;;
-esac
+http_get_retry "http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111" 404 "detail after backend restart"
+printf '%s' "${HTTP_BODY}" | grep -q "POS_RECORD_NOT_FOUND" || { echo "ERROR: detail 404 missing POS_RECORD_NOT_FOUND after restart: ${HTTP_BODY}" >&2; exit 1; }
+echo "detail: 404 POS_RECORD_NOT_FOUND after backend restart"
 
 # --- 11: RabbitMQ health and management API (Task 4-5) -------------------------
 
@@ -290,7 +339,7 @@ echo "== stack upload (committed fixture) =="
 FIXTURE="src/test/resources/fixtures/valid-two-pdf.zip"
 [ -f "${FIXTURE}" ] || { echo "ERROR: fixture ${FIXTURE} is missing." >&2; exit 1; }
 UPLOAD_RESPONSE_FILE="$(mktemp "pos-doc-task2-test-upload.XXXXXX")"
-UPLOAD_CODE="$(curl --silent --output "${UPLOAD_RESPONSE_FILE}" --write-out '%{http_code}' \
+UPLOAD_CODE="$(curl --silent --max-time 15 --output "${UPLOAD_RESPONSE_FILE}" --write-out '%{http_code}' \
     --form "file=@${FIXTURE};filename=EREF-STACK-001.zip;type=application/zip" \
     --form "policyNumber=POLICY-STACK-001" \
     http://localhost:18080/api/v1/pos-records)"
@@ -629,7 +678,7 @@ rm -rf "${EXTRACT_DIR}"
 
 echo "== OCR stub health check (WireMock) =="
 OCR_STUB_HTTP_CODE="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
-    sh -c 'curl --silent --output /dev/null --write-out "%{http_code}" http://ocr-stub:8080/__admin/mappings 2>/dev/null || echo 000')"
+    sh -c 'curl --silent --max-time 15 --output /dev/null --write-out "%{http_code}" http://ocr-stub:8080/__admin/mappings 2>/dev/null || echo 000')"
 if [ "${OCR_STUB_HTTP_CODE}" != "200" ]; then
     echo "ERROR: OCR stub (WireMock) is not healthy: HTTP ${OCR_STUB_HTTP_CODE} from /__admin/mappings" >&2
     exit 1
@@ -760,6 +809,81 @@ if [ "${OCR_REQUEST_COUNT_AFTER}" != "2" ]; then
     exit 1
 fi
 echo "wiremock: still exactly 2 OCR requests after duplicate delivery"
+
+# --- Task 10: read/search/PATCH/verify/delete smoke flow -----------------------
+#
+# The ingested record above is a completed ingestion (REVIEW_REQUIRED, two
+# COMPLETED documents, one COMPLETED job). This synthetic-metadata smoke flow
+# exercises the persistence-backed review API end to end: detail read, PATCH,
+# search, explicit verification, and soft delete. It runs last so the trailing
+# mutation (delete) cannot disturb the earlier checks.
+
+echo "== Task 10 smoke: detail read of the ingested record =="
+http_get_retry "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}" 200 "detail read"
+printf '%s' "${HTTP_BODY}" | grep -q "\"id\":\"${POS_RECORD_ID}\"" || { echo "ERROR: detail response missing id: ${HTTP_BODY}" >&2; exit 1; }
+printf '%s' "${HTTP_BODY}" | grep -q '"status":"REVIEW_REQUIRED"' || { echo "ERROR: ingested record is not REVIEW_REQUIRED: ${HTTP_BODY}" >&2; exit 1; }
+echo "detail: read OK, status REVIEW_REQUIRED"
+V0="$(json_int version)"
+[ -n "${V0}" ] || { echo "ERROR: could not read version from detail: ${HTTP_BODY}" >&2; exit 1; }
+
+echo "== Task 10 smoke: PATCH stores synthetic metadata =="
+http_call PATCH "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}" \
+    '{"expectedVersion":'"${V0}"',"policyholderName":"Stack Smoke Holder","consultantName":"Stack Smoke Consultant"}' \
+    "application/merge-patch+json"
+if [ "${HTTP_CODE}" != "200" ]; then
+    echo "ERROR: PATCH returned http ${HTTP_CODE}: ${HTTP_BODY}" >&2
+    exit 1
+fi
+printf '%s' "${HTTP_BODY}" | grep -q '"policyholderName":"Stack Smoke Holder"' || { echo "ERROR: PATCH did not store holder: ${HTTP_BODY}" >&2; exit 1; }
+printf '%s' "${HTTP_BODY}" | grep -q '"consultantName":"Stack Smoke Consultant"' || { echo "ERROR: PATCH did not store consultant: ${HTTP_BODY}" >&2; exit 1; }
+printf '%s' "${HTTP_BODY}" | grep -q '"status":"REVIEW_REQUIRED"' || { echo "ERROR: PATCH on REVIEW_REQUIRED changed status: ${HTTP_BODY}" >&2; exit 1; }
+V1="$(json_int version)"
+[ -n "${V1}" ] || { echo "ERROR: could not read version after PATCH: ${HTTP_BODY}" >&2; exit 1; }
+[ "${V1}" = "$((V0 + 1))" ] || { echo "ERROR: PATCH did not bump version (${V0} -> ${V1})" >&2; exit 1; }
+echo "patch: metadata stored, version ${V0} -> ${V1}"
+
+echo "== Task 10 smoke: search finds the record by policy number =="
+http_call POST "http://localhost:18080/api/v1/pos-records/search" '{"policyNumber":"POLICY-STACK-001"}'
+if [ "${HTTP_CODE}" != "200" ]; then
+    echo "ERROR: search returned http ${HTTP_CODE}: ${HTTP_BODY}" >&2
+    exit 1
+fi
+printf '%s' "${HTTP_BODY}" | grep -q "\"id\":\"${POS_RECORD_ID}\"" || { echo "ERROR: search did not return the record: ${HTTP_BODY}" >&2; exit 1; }
+echo "search: record found by policy number"
+
+echo "== Task 10 smoke: verification moves it to COMPLETED =="
+http_call POST "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/verification" '{"expectedVersion":'"${V1}"'}'
+if [ "${HTTP_CODE}" != "200" ]; then
+    echo "ERROR: verification returned http ${HTTP_CODE}: ${HTTP_BODY}" >&2
+    exit 1
+fi
+printf '%s' "${HTTP_BODY}" | grep -q '"status":"COMPLETED"' || { echo "ERROR: verification did not set COMPLETED: ${HTTP_BODY}" >&2; exit 1; }
+V2="$(json_int version)"
+[ -n "${V2}" ] || { echo "ERROR: could not read version after verify: ${HTTP_BODY}" >&2; exit 1; }
+[ "${V2}" = "$((V1 + 1))" ] || { echo "ERROR: verification did not bump version (${V1} -> ${V2})" >&2; exit 1; }
+echo "verify: status COMPLETED, version ${V1} -> ${V2}"
+
+echo "== Task 10 smoke: soft delete returns 204 =="
+http_call DELETE "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}"
+if [ "${HTTP_CODE}" != "204" ]; then
+    echo "ERROR: delete returned http ${HTTP_CODE}: ${HTTP_BODY}" >&2
+    exit 1
+fi
+echo "delete: 204"
+
+echo "== Task 10 smoke: deleted record hidden from detail and search =="
+http_get_retry "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}" 404 "deleted detail"
+printf '%s' "${HTTP_BODY}" | grep -q "POS_RECORD_NOT_FOUND" || { echo "ERROR: deleted detail 404 missing code: ${HTTP_BODY}" >&2; exit 1; }
+http_call POST "http://localhost:18080/api/v1/pos-records/search" '{"policyNumber":"POLICY-STACK-001"}'
+if [ "${HTTP_CODE}" != "200" ]; then
+    echo "ERROR: post-delete search returned http ${HTTP_CODE}: ${HTTP_BODY}" >&2
+    exit 1
+fi
+if printf '%s' "${HTTP_BODY}" | grep -q "\"id\":\"${POS_RECORD_ID}\""; then
+    echo "ERROR: deleted record still returned by search: ${HTTP_BODY}" >&2
+    exit 1
+fi
+echo "post-delete: hidden from detail and search"
 
 echo ""
 echo "verify-container-stack: ALL CHECKS PASSED"

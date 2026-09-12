@@ -134,8 +134,14 @@ paths:
       summary: Correct or add POS metadata
       description: |
         Applies a partial update to user-editable metadata. `expectedVersion` prevents
-        lost updates. System-managed identifiers, processing state, storage references,
-        audit fields, and timestamps cannot be changed through this operation.
+        lost updates; a mismatch with the current resource version returns 412. The
+        record must be REVIEW_REQUIRED or COMPLETED; any other state returns 409.
+        System-managed identifiers, processing state, storage references, audit fields,
+        and timestamps cannot be changed through this operation. An omitted property
+        and an explicit JSON `null` are indistinguishable and both mean "unchanged";
+        this operation does not clear a value to null. A patch carrying no editable
+        value returns 400. Editing a COMPLETED record that actually changes a value
+        moves the record back to REVIEW_REQUIRED.
       requestBody:
         required: true
         content:
@@ -208,6 +214,51 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pos-records/{posRecordId}/verification:
+    parameters:
+      - $ref: '#/components/parameters/PosRecordId'
+    post:
+      tags: [POS records]
+      operationId: verifyPosRecord
+      summary: Verify a reviewed POS record
+      description: |
+        Marks a REVIEW_REQUIRED record COMPLETED once every verification prerequisite
+        is satisfied: at least one document exists and every document and the
+        associated ingestion job are COMPLETED, and the eRef number, policy number,
+        policyholder name, and consultant name are all present. This is the only
+        operation that moves a record from REVIEW_REQUIRED to COMPLETED. A record
+        that is not REVIEW_REQUIRED returns 409; a stale expectedVersion returns 412;
+        unmet prerequisites return 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyPosRecordRequest'
+      responses:
+        '200':
+          description: Verified POS record, now COMPLETED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PosRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -448,6 +499,17 @@ components:
         policyCreateDate:
           type: string
           format: date
+
+    VerifyPosRecordRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Resource version the client last observed; must match to verify.
 
     PosRecordSearchRequest:
       type: object

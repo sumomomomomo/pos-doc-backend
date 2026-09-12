@@ -23,6 +23,7 @@ import com.yourcompany.pos.api.model.ProblemFieldErrorsInner;
 
 import horse.sumomo.pos_doc_backend.ingestion.archive.ArchiveValidationException;
 import horse.sumomo.pos_doc_backend.ingestion.application.IntakeException;
+import horse.sumomo.pos_doc_backend.review.PosRecordApiException;
 
 /**
  * Maps intake and HTTP failures to the generated {@link Problem} DTO with
@@ -45,6 +46,13 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(IntakeException.class)
 	public ResponseEntity<Problem> handleIntake(IntakeException e) {
 		IntakeException.Code code = e.getCode();
+		log.warn("Request rejected (category={})", code.code());
+		return problem(code.httpStatus(), code.code(), code.detail());
+	}
+
+	@ExceptionHandler(PosRecordApiException.class)
+	public ResponseEntity<Problem> handlePosRecordApi(PosRecordApiException e) {
+		PosRecordApiException.Code code = e.getCode();
 		log.warn("Request rejected (category={})", code.code());
 		return problem(code.httpStatus(), code.code(), code.detail());
 	}
