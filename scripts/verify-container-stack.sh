@@ -155,7 +155,7 @@ echo "minio: live"
 # --- 5: backend health --------------------------------------------------------
 
 echo "== backend health check =="
-HEALTH="$(curl --fail --silent --show-error http://localhost:8080/api/v1/actuator/health)"
+HEALTH="$(curl --fail --silent --show-error http://localhost:18080/api/v1/actuator/health)"
 case "${HEALTH}" in
     *"UP"*) echo "backend: UP" ;;
     *) echo "ERROR: backend health does not report UP: ${HEALTH}" >&2; exit 1 ;;
@@ -165,7 +165,7 @@ esac
 
 echo "== dummy pos-record endpoint =="
 DUMMY_RESPONSE="$(curl --fail --silent --show-error \
-    http://localhost:8080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
+    http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
 case "${DUMMY_RESPONSE}" in
     *"11111111-1111-1111-1111-111111111111"*) echo "dummy endpoint: echoes fixed UUID" ;;
     *) echo "ERROR: dummy endpoint did not echo the fixed UUID: ${DUMMY_RESPONSE}" >&2; exit 1 ;;
@@ -232,7 +232,7 @@ echo "== re-check sqlite file and dummy endpoint =="
 docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
 echo "sqlite: still present after backend restart"
 DUMMY_RESPONSE="$(curl --fail --silent --show-error \
-    http://localhost:8080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
+    http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111)"
 case "${DUMMY_RESPONSE}" in
     *"11111111-1111-1111-1111-111111111111"*) echo "dummy endpoint: OK after backend restart" ;;
     *) echo "ERROR: dummy endpoint failed after backend restart: ${DUMMY_RESPONSE}" >&2; exit 1 ;;
@@ -293,7 +293,7 @@ UPLOAD_RESPONSE_FILE="$(mktemp "pos-doc-task2-test-upload.XXXXXX")"
 UPLOAD_CODE="$(curl --silent --output "${UPLOAD_RESPONSE_FILE}" --write-out '%{http_code}' \
     --form "file=@${FIXTURE};filename=EREF-STACK-001.zip;type=application/zip" \
     --form "policyNumber=POLICY-STACK-001" \
-    http://localhost:8080/api/v1/pos-records)"
+    http://localhost:18080/api/v1/pos-records)"
 if [ "${UPLOAD_CODE}" != "202" ]; then
     echo "ERROR: stack upload returned http ${UPLOAD_CODE}:" >&2
     cat "${UPLOAD_RESPONSE_FILE}" >&2
@@ -310,7 +310,7 @@ echo "== job queryable and QUEUED =="
 i=0
 JOB_RESPONSE=""
 while [ "${i}" -lt 30 ]; do
-    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:8080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
+    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
     case "${JOB_RESPONSE}" in
         *"QUEUED"*) break ;;
     esac
@@ -430,7 +430,7 @@ if [ "${STATUS}" != "healthy" ]; then
     echo "ERROR: backend did not become healthy after the second restart." >&2
     exit 1
 fi
-JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:8080/api/v1/ingestion-jobs/${JOB_ID})"
+JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID})"
 case "${JOB_RESPONSE}" in
     *"QUEUED"*) echo "job: still QUEUED after backend restart" ;;
     *) echo "ERROR: job no longer QUEUED after backend restart: ${JOB_RESPONSE}" >&2; exit 1 ;;
@@ -474,7 +474,7 @@ echo "== job reaches COMPLETED with attempt_count=1 =="
 i=0
 JOB_RESPONSE=""
 while [ "${i}" -lt 60 ]; do
-    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:8080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
+    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
     case "${JOB_RESPONSE}" in
         *"\"status\":\"COMPLETED\""*'"attemptCount":1'*) break ;;
     esac
@@ -502,7 +502,7 @@ echo "job: no terminal error"
 
 echo "== pos_document: exactly two ordered COMPLETED rows (Task 9) =="
 DOCS_RESPONSE="$(curl --fail --silent --show-error \
-    http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
+    http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
 COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
 if [ "${COUNT}" != "2" ]; then
     echo "ERROR: expected 2 documents, got ${COUNT}: ${DOCS_RESPONSE}" >&2
@@ -745,7 +745,7 @@ if [ "${READY}" != "0" ] || [ "${UNACKED}" != "0" ]; then
 fi
 # Still exactly two documents.
 DOCS_AFTER="$(curl --fail --silent --show-error \
-    http://localhost:8080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
+    http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
 COUNT_AFTER="$(printf '%s' "${DOCS_AFTER}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
 if [ "${COUNT_AFTER}" != "2" ]; then
     echo "ERROR: duplicate delivery created extra documents: ${DOCS_AFTER}" >&2

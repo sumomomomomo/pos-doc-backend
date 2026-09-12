@@ -8,7 +8,7 @@ RabbitMQ through a transactional outbox.
 
 | Service | Endpoint |
 | --- | --- |
-| Backend API | `http://localhost:8080/api/v1` |
+| Backend API | `http://localhost:18080/api/v1` |
 | MinIO API | `http://localhost:9000` |
 | MinIO console (local development only) | `http://localhost:9001` |
 | RabbitMQ AMQP | `localhost:5672` |

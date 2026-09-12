@@ -87,7 +87,7 @@ class DocumentOcrEndToEndIntegrationTest {
 
 	private static final String TEST_BUCKET = "pos-documents-ocr-e2e-test";
 	private static final DockerImageName MINIO_IMAGE =
-			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
+			DockerImageName.parse("cgr.dev/chainguard/minio:latest").asCompatibleSubstituteFor("minio/minio");
 	private static final byte[] PDF_A = SyntheticPdfFactory.createPdf("Doc A");
 	private static final byte[] PDF_B = SyntheticPdfFactory.createPdf("Doc B");
 	private static final String SYNTHETIC_OCR_TEXT = "SYNTHETIC OCR TEXT";

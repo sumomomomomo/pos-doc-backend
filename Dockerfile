@@ -26,6 +26,6 @@ RUN mkdir -p /data/sqlite && chown -R spring:spring /app /data/sqlite
 COPY --from=build --chown=spring:spring /workspace/target/app.jar /app/app.jar
 
 USER spring:spring
-EXPOSE 8080
+EXPOSE 18080
 
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]

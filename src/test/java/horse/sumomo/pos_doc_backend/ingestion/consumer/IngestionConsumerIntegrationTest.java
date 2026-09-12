@@ -67,7 +67,7 @@ class IngestionConsumerIntegrationTest {
 
 	private static final String TEST_BUCKET = "pos-documents-consumer-test";
 	private static final DockerImageName MINIO_IMAGE =
-			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
+			DockerImageName.parse("cgr.dev/chainguard/minio:latest").asCompatibleSubstituteFor("minio/minio");
 
 	private static final byte[] PDF_A = horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory
 			.createPdf("Doc A");

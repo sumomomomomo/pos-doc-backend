@@ -43,7 +43,7 @@ class ArchiveExtractionServiceIntegrationTest {
 
 	private static final String TEST_BUCKET = "pos-documents-extractor-test";
 	private static final DockerImageName MINIO_IMAGE =
-			DockerImageName.parse("minio/minio:RELEASE.2025-09-07T16-13-09Z");
+			DockerImageName.parse("cgr.dev/chainguard/minio:latest").asCompatibleSubstituteFor("minio/minio");
 
 	private static final byte[] PDF_A = ("%PDF-1.4\n% Document A\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
 	private static final byte[] PDF_B = ("%PDF-1.4\n% Document B\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
