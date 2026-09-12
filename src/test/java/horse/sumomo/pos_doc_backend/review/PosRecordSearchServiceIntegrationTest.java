@@ -228,7 +228,7 @@ class PosRecordSearchServiceIntegrationTest {
 		assertEquals(List.of(old.getId(), mid.getId(), newest.getId()),
 				ids(this.searchService.search(new PosRecordSearchRequest()
 						.policyholderName(holder).fuzzyName(false).sort(PosRecordSearchRequest.SortEnum.UPDATED_AT_ASC))));
-		// RELEVANCE without a name query falls back to updatedAt desc.
+		// RELEVANCE with an exact name match (all scores equal) falls back to updatedAt desc.
 		assertEquals(List.of(newest.getId(), mid.getId(), old.getId()),
 				ids(this.searchService.search(new PosRecordSearchRequest()
 						.policyholderName(holder).fuzzyName(false).sort(PosRecordSearchRequest.SortEnum.RELEVANCE))));
@@ -259,6 +259,24 @@ class PosRecordSearchServiceIntegrationTest {
 				? List.of(r1.getId(), r2.getId()) : List.of(r2.getId(), r1.getId());
 		assertEquals(expected, ids(this.searchService.search(new PosRecordSearchRequest()
 				.policyholderName(holder).fuzzyName(false).sort(PosRecordSearchRequest.SortEnum.UPDATED_AT_DESC))));
+	}
+
+	@Test
+	void relevanceWithoutNameQueryOrdersByUpdatedAtThenUuid() {
+		// A genuinely name-less RELEVANCE search (no policyholderName or other name
+		// criteria) must fall back to updatedAt descending, then UUID ascending.
+		PosRecordEntity old = rec(null, RR, T(100), T(1));
+		PosRecordEntity mid = rec(null, RR, T(100), T(2));
+		PosRecordEntity newestA = rec(null, RR, T(100), T(3));
+		PosRecordEntity newestB = rec(null, RR, T(100), T(3)); // ties newest on updatedAt
+
+		List<UUID> expected = newestA.getId().compareTo(newestB.getId()) <= 0
+				? List.of(newestA.getId(), newestB.getId(), mid.getId(), old.getId())
+				: List.of(newestB.getId(), newestA.getId(), mid.getId(), old.getId());
+
+		assertEquals(expected,
+				ids(this.searchService.search(new PosRecordSearchRequest()
+						.sort(PosRecordSearchRequest.SortEnum.RELEVANCE))));
 	}
 
 	// ------------------------------------------------------------------
@@ -359,6 +377,18 @@ class PosRecordSearchServiceIntegrationTest {
 		assertInvalid(new PosRecordSearchRequest().minimumNameSimilarity(1.5));
 		assertInvalid(new PosRecordSearchRequest().minimumNameSimilarity(-0.1));
 		assertInvalid(new PosRecordSearchRequest().erefNumber("   "));
+	}
+
+	@Test
+	void punctuationOnlyIdentifiersAndNonFiniteThresholdsReturn400() {
+		// A nonblank identifier with no letters/digits (e.g. "---") empties the
+		// normalizer; the service must translate that to a 400, never a 500.
+		assertInvalid(new PosRecordSearchRequest().erefNumber("---"));
+		assertInvalid(new PosRecordSearchRequest().policyNumber("..."));
+		// Non-finite thresholds (NaN and infinities) are rejected via isFinite.
+		assertInvalid(new PosRecordSearchRequest().minimumNameSimilarity(Double.NaN));
+		assertInvalid(new PosRecordSearchRequest().minimumNameSimilarity(Double.POSITIVE_INFINITY));
+		assertInvalid(new PosRecordSearchRequest().minimumNameSimilarity(Double.NEGATIVE_INFINITY));
 	}
 
 	private void assertInvalid(PosRecordSearchRequest request) {

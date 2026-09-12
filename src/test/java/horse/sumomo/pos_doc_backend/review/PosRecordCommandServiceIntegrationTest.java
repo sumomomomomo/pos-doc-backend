@@ -147,7 +147,7 @@ class PosRecordCommandServiceIntegrationTest {
 		Instant updatedAtBefore = record.getUpdatedAt();
 
 		PosRecord result = this.commandService.patch(record.getId(), new PosRecordPatch(version(record.getId()))
-				.erefNumber("eref  same ")); // normalizes to the same EREFSAME
+				.erefNumber("  EREF-SAME  ")); // whitespace-only difference -> true no-op
 
 		assertEquals(versionBefore, result.getVersion().longValue(), "no-op must not bump the version");
 		PosRecordEntity reloaded = this.posRecordRepository.findById(record.getId()).orElseThrow();
@@ -398,6 +398,99 @@ class PosRecordCommandServiceIntegrationTest {
 		PosRecordEntity fresh = reviewable("EREF-REUSE", "POL-REUSE", "Holder R2", "Consultant R2");
 		assertEquals(fresh.getId(), this.posRecordRepository
 				.findByErefNumberNormalizedAndDeletedAtIsNull("EREFREUSE").orElseThrow().getId());
+	}
+
+	// ------------------------------------------------------------------
+	// normalization failures -> sanitized 400 (never 500)
+	// ------------------------------------------------------------------
+
+	@Test
+	void punctuationOnlyErefAndPolicyReturnNoPatchFields() {
+		PosRecordEntity record = reviewable("EREF-PUNCT", "POL-PUNCT", "Holder P", "Consultant P");
+		long v = version(record.getId());
+
+		PosRecordApiException erefEx = assertThrows(PosRecordApiException.class,
+				() -> this.commandService.patch(record.getId(), new PosRecordPatch(v).erefNumber("---")));
+		assertEquals(PosRecordApiException.Code.NO_PATCH_FIELDS, erefEx.getCode());
+
+		PosRecordApiException policyEx = assertThrows(PosRecordApiException.class,
+				() -> this.commandService.patch(record.getId(), new PosRecordPatch(v).policyNumber("...")));
+		assertEquals(PosRecordApiException.Code.NO_PATCH_FIELDS, policyEx.getCode());
+
+		// The record is untouched (no version bump).
+		assertEquals(v, version(record.getId()));
+	}
+
+	// ------------------------------------------------------------------
+	// display-value correction + no-op detection
+	// ------------------------------------------------------------------
+
+	@Test
+	void displayOnlyCorrectionsAreStored() {
+		PosRecordEntity record = reviewable("EREFDC1", "POLDC1", "JANE TAN", "Consultant X");
+		long v = version(record.getId());
+
+		this.commandService.patch(record.getId(), new PosRecordPatch(v)
+				.erefNumber("EREF-DC-1")
+				.policyNumber("POL-DC-1")
+				.policyholderName("Jane Tan"));
+
+		PosRecordEntity reloaded = this.posRecordRepository.findById(record.getId()).orElseThrow();
+		assertEquals("EREF-DC-1", reloaded.getErefNumber());
+		assertEquals("EREFDC1", reloaded.getErefNumberNormalized());
+		assertEquals("POL-DC-1", reloaded.getPolicyNumber());
+		assertEquals("POLDC1", reloaded.getPolicyNumberNormalized());
+		assertEquals("Jane Tan", reloaded.getPolicyholderName());
+		assertEquals("jane tan", reloaded.getPolicyholderNameNormalized());
+		assertEquals(v + 1, reloaded.getVersion(), "display-only correction bumps the version");
+	}
+
+	@Test
+	void displayOnlyEditOnCompletedRecordReturnsToReviewRequired() {
+		PosRecordEntity record = recordWithStatus(PosRecordStatus.COMPLETED, "EREFDC2", "POLDC2", "JANE TAN",
+				"Consultant X");
+		long v = version(record.getId());
+
+		PosRecord result = this.commandService.patch(record.getId(), new PosRecordPatch(v)
+				.erefNumber("EREF-DC-2")); // display-only (same normalized form)
+
+		assertEquals(com.yourcompany.pos.api.model.PosRecordStatus.REVIEW_REQUIRED, result.getStatus());
+	}
+
+	@Test
+	void whitespaceOnlyChangesAreTrueNoOps() {
+		PosRecordEntity record = reviewable("EREFDC3", "POLDC3", "JANE TAN", "Consultant Tan");
+		long v = version(record.getId());
+		Instant updatedAtBefore = this.posRecordRepository.findById(record.getId()).orElseThrow().getUpdatedAt();
+
+		PosRecord result = this.commandService.patch(record.getId(), new PosRecordPatch(v)
+				.erefNumber("  EREFDC3  ")
+				.policyNumber(" POLDC3 ")
+				.policyholderName("  JANE TAN  ")
+				.consultantName("  Consultant Tan  "));
+
+		// True no-op: version, updatedAt, and status are all unchanged.
+		assertEquals(v, result.getVersion().longValue());
+		PosRecordEntity reloaded = this.posRecordRepository.findById(record.getId()).orElseThrow();
+		assertEquals(v, reloaded.getVersion());
+		assertEquals(updatedAtBefore, reloaded.getUpdatedAt());
+		assertEquals(PosRecordStatus.REVIEW_REQUIRED, reloaded.getStatus());
+	}
+
+	@Test
+	void consultantWhitespaceOnlyIsNoOpButRealChangeIsStoredTrimmed() {
+		PosRecordEntity record = reviewable("EREFDC4", "POLDC4", "Holder C", "Consultant Tan");
+		long v = version(record.getId());
+
+		PosRecord noop = this.commandService.patch(record.getId(),
+				new PosRecordPatch(v).consultantName("  Consultant Tan  "));
+		assertEquals(v, noop.getVersion().longValue(), "whitespace-only consultant change is a no-op");
+
+		PosRecord edited = this.commandService.patch(record.getId(),
+				new PosRecordPatch(v).consultantName("  New Consultant  "));
+		assertEquals(v + 1, edited.getVersion().longValue());
+		PosRecordEntity reloaded = this.posRecordRepository.findById(record.getId()).orElseThrow();
+		assertEquals("New Consultant", reloaded.getConsultantName(), "consultant stored trimmed");
 	}
 
 	// ------------------------------------------------------------------

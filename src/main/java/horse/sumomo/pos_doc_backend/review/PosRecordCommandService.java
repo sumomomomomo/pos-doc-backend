@@ -88,9 +88,25 @@ public class PosRecordCommandService {
 		}
 		long expectedVersion = requireVersion(patch.getExpectedVersion());
 
-		final String erefNorm = erefRaw == null ? null : MetadataNormalizer.normalizeIdentifier(erefRaw);
-		final String policyNorm = policyRaw == null ? null : MetadataNormalizer.normalizeIdentifier(policyRaw);
-		final String holderNorm = holderRaw == null ? null : MetadataNormalizer.normalizeName(holderRaw);
+		// Canonicalize the supplied display values (trim outer whitespace) and derive
+		// the normalized shadow forms. A value that survives the nonblank check but has
+		// no letters or digits (e.g. "---") makes the normalizer throw; that is a client
+		// error (400 NO_PATCH_FIELDS), never a 500.
+		final String erefDisplay = erefRaw == null ? null : erefRaw.trim();
+		final String policyDisplay = policyRaw == null ? null : policyRaw.trim();
+		final String holderDisplay = holderRaw == null ? null : holderRaw.trim();
+		final String consultantDisplay = consultantRaw == null ? null : consultantRaw.trim();
+		final String erefNorm;
+		final String policyNorm;
+		final String holderNorm;
+		try {
+			erefNorm = erefDisplay == null ? null : MetadataNormalizer.normalizeIdentifier(erefDisplay);
+			policyNorm = policyDisplay == null ? null : MetadataNormalizer.normalizeIdentifier(policyDisplay);
+			holderNorm = holderDisplay == null ? null : MetadataNormalizer.normalizeName(holderDisplay);
+		}
+		catch (IllegalArgumentException ex) {
+			throw new PosRecordApiException(PosRecordApiException.Code.NO_PATCH_FIELDS);
+		}
 
 		// Set inside the write transaction (they depend on the persisted values) and
 		// read afterwards to resolve a flush-time unique-constraint race.
@@ -110,10 +126,17 @@ public class PosRecordCommandService {
 				}
 				boolean wasCompleted = state == PosRecordStatus.COMPLETED;
 
-				boolean eChanged = erefRaw != null && !Objects.equals(erefNorm, entity.getErefNumberNormalized());
-				boolean pChanged = policyRaw != null && !Objects.equals(policyNorm, entity.getPolicyNumberNormalized());
-				boolean hChanged = holderRaw != null && !Objects.equals(holderNorm, entity.getPolicyholderNameNormalized());
-				boolean cChanged = consultantRaw != null && !Objects.equals(consultantRaw, entity.getConsultantName());
+				// A field counts as changed when its canonical (trimmed) display value OR
+				// its normalized value differs from what is stored. A display-only
+				// correction (same normalized form, different casing/punctuation) is a
+				// real edit; a whitespace-only difference is a true no-op.
+				boolean eNorm = normChanged(erefNorm, entity.getErefNumberNormalized());
+				boolean pNorm = normChanged(policyNorm, entity.getPolicyNumberNormalized());
+				boolean hNorm = normChanged(holderNorm, entity.getPolicyholderNameNormalized());
+				boolean eChanged = eNorm || displayChanged(erefDisplay, entity.getErefNumber());
+				boolean pChanged = pNorm || displayChanged(policyDisplay, entity.getPolicyNumber());
+				boolean hChanged = hNorm || displayChanged(holderDisplay, entity.getPolicyholderName());
+				boolean cChanged = displayChanged(consultantDisplay, entity.getConsultantName());
 				boolean dChanged = createDate != null && !Objects.equals(createDate, entity.getPolicyCreateDate());
 				boolean realChange = eChanged || pChanged || hChanged || cChanged || dChanged;
 
@@ -121,28 +144,31 @@ public class PosRecordCommandService {
 					return PosRecordApiMapper.toRecord(entity);
 				}
 
-				if (eChanged && this.posRecordRepository
+				// Uniqueness is on the normalized identifier, so it is only at risk when the
+				// normalized value actually changes. A display-only correction keeps the
+				// existing normalized value and cannot collide.
+				if (eNorm && this.posRecordRepository
 						.existsByErefNumberNormalizedAndDeletedAtIsNull(erefNorm)) {
 					throw new PosRecordApiException(PosRecordApiException.Code.DUPLICATE_EREF_NUMBER);
 				}
-				if (pChanged && this.posRecordRepository
+				if (pNorm && this.posRecordRepository
 						.existsByPolicyNumberNormalizedAndDeletedAtIsNull(policyNorm)) {
 					throw new PosRecordApiException(PosRecordApiException.Code.DUPLICATE_POLICY_NUMBER);
 				}
 
-				changed[0] = eChanged;
-				changed[1] = pChanged;
+				changed[0] = eNorm;
+				changed[1] = pNorm;
 				if (eChanged) {
-					entity.setErefNumber(erefRaw);
+					entity.setErefNumber(erefDisplay);
 				}
 				if (pChanged) {
-					entity.setPolicyNumber(policyRaw);
+					entity.setPolicyNumber(policyDisplay);
 				}
 				if (hChanged) {
-					entity.setPolicyholderName(holderRaw);
+					entity.setPolicyholderName(holderDisplay);
 				}
 				if (cChanged) {
-					entity.setConsultantName(consultantRaw);
+					entity.setConsultantName(consultantDisplay);
 				}
 				if (dChanged) {
 					entity.setPolicyCreateDate(createDate);
@@ -274,6 +300,26 @@ public class PosRecordCommandService {
 
 	private static boolean isBlank(String value) {
 		return value != null && value.isBlank();
+	}
+
+	/**
+	 * True when the supplied canonical (already-trimmed) display value differs from the
+	 * stored display value, ignoring surrounding whitespace on the stored side. A null
+	 * supplied value means "not provided" and never counts as a change.
+	 */
+	private static boolean displayChanged(String canonicalSupplied, String stored) {
+		if (canonicalSupplied == null) {
+			return false;
+		}
+		return !Objects.equals(canonicalSupplied, stored == null ? null : stored.trim());
+	}
+
+	/** True when the supplied normalized value differs from the stored one. */
+	private static boolean normChanged(String suppliedNorm, String storedNorm) {
+		if (suppliedNorm == null) {
+			return false;
+		}
+		return !Objects.equals(suppliedNorm, storedNorm);
 	}
 
 	private record DuplicateResult(boolean eref, boolean policy) {

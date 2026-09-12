@@ -58,7 +58,8 @@ public class PosRecordSearchService {
 		boolean fuzzy = request.getFuzzyName() == null || request.getFuzzyName();
 		SortEnum sort = request.getSort() == null ? SortEnum.RELEVANCE : request.getSort();
 
-		if (page < 0 || size < 1 || size > MAX_SIZE || threshold < 0.0 || threshold > 1.0) {
+		if (page < 0 || size < 1 || size > MAX_SIZE || !Double.isFinite(threshold)
+				|| threshold < 0.0 || threshold > 1.0) {
 			throw new PosRecordApiException(PosRecordApiException.Code.INVALID_SEARCH_REQUEST);
 		}
 
@@ -119,7 +120,14 @@ public class PosRecordSearchService {
 		if (raw.isBlank()) {
 			throw new PosRecordApiException(PosRecordApiException.Code.INVALID_SEARCH_REQUEST);
 		}
-		return name ? MetadataNormalizer.normalizeName(raw) : MetadataNormalizer.normalizeIdentifier(raw);
+		try {
+			return name ? MetadataNormalizer.normalizeName(raw) : MetadataNormalizer.normalizeIdentifier(raw);
+		}
+		catch (IllegalArgumentException ex) {
+			// A nonblank value with no letters/digits (e.g. "---") empties the
+			// identifier normalizer; that is a client error (400), never a 500.
+			throw new PosRecordApiException(PosRecordApiException.Code.INVALID_SEARCH_REQUEST);
+		}
 	}
 
 	private static Specification<PosRecordEntity> activeCandidateSpec(String erefNorm, String policyNorm,

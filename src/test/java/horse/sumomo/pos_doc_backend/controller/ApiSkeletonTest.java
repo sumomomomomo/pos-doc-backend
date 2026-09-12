@@ -171,6 +171,21 @@ class ApiSkeletonTest {
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON));
 	}
 
+	@Test
+	void searchPunctuationOnlyIdentifierReturns400Not500() throws Exception {
+		// "---" passes bean validation (nonblank) but has no letters/digits; the real
+		// service maps that to INVALID_SEARCH_REQUEST, which must surface as 400.
+		when(this.searchService.search(any())).thenThrow(new PosRecordApiException(Code.INVALID_SEARCH_REQUEST));
+
+		mockMvc.perform(post("/pos-records/search")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"erefNumber\":\"---\"}"))
+				.andExpect(status().isBadRequest())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(jsonPath("$.status").value(400))
+				.andExpect(jsonPath("$.code").value("INVALID_SEARCH_REQUEST"));
+	}
+
 	// ------------------------------------------------------------------
 	// detail read
 	// ------------------------------------------------------------------
@@ -290,6 +305,23 @@ class ApiSkeletonTest {
 						.content("{\"expectedVersion\":-1,\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON));
+	}
+
+	@Test
+	void updatePosRecordPunctuationOnlyErefReturns400Not500() throws Exception {
+		// "---" passes bean validation (nonblank) but has no letters/digits; the real
+		// service maps that to NO_PATCH_FIELDS, which must surface as 400, never 500.
+		when(this.commandService.patch(any(UUID.class), any()))
+				.thenThrow(new PosRecordApiException(Code.NO_PATCH_FIELDS));
+
+		UUID id = UUID.randomUUID();
+		mockMvc.perform(patch("/pos-records/{id}", id)
+						.contentType(MERGE_PATCH)
+						.content("{\"expectedVersion\":0,\"erefNumber\":\"---\"}"))
+				.andExpect(status().isBadRequest())
+				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+				.andExpect(jsonPath("$.status").value(400))
+				.andExpect(jsonPath("$.code").value("NO_PATCH_FIELDS"));
 	}
 
 	// ------------------------------------------------------------------
