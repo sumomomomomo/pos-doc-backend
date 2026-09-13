@@ -25,6 +25,12 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.AbstractMockHttpServletRequestBuilder;
+
+import horse.sumomo.pos_doc_backend.security.OidcTestAuth;
+
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 
 import io.minio.MinioClient;
 import io.minio.MakeBucketArgs;
@@ -72,6 +78,12 @@ class PosArchiveIntakeIntegrationTest {
 
 	@Autowired
 	private MockMvc mockMvc;
+
+	private ResultActions perform(AbstractMockHttpServletRequestBuilder builder) throws Exception {
+		return this.mockMvc.perform(builder
+				.with(OidcTestAuth.oidc("pos-doc-test-subject-reviewer", true))
+				.with(csrf()));
+	}
 
 	@Autowired
 	private MinioObjectStorage storage;
@@ -123,7 +135,7 @@ class PosArchiveIntakeIntegrationTest {
 		byte[] zipBytes = zipBytes(Map.of("documents/first.pdf", PDF, "documents/second.pdf", PDF));
 		MockMultipartFile file = new MockMultipartFile("file", "EREF-2026-101.zip", "application/zip", zipBytes);
 
-		MvcResult result = this.mockMvc.perform(multipart("/pos-records").file(file))
+		MvcResult result = this.perform(multipart("/pos-records").file(file))
 				.andExpect(status().isAccepted())
 				.andExpect(jsonPath("$.status").value("UPLOADED"))
 				.andExpect(jsonPath("$.posRecordId").isNotEmpty())
@@ -199,14 +211,14 @@ class PosArchiveIntakeIntegrationTest {
 
 		// A .txt entry instead of PDFs.
 		byte[] badZip = zipBytes(Map.of("documents/notes.txt", "not a pdf".getBytes(StandardCharsets.UTF_8)));
-		this.mockMvc.perform(multipart("/pos-records")
+		this.perform(multipart("/pos-records")
 				.file(new MockMultipartFile("file", "EREF-2026-201.zip", "application/zip", badZip)))
 				.andExpect(status().isUnprocessableEntity())
 				.andExpect(jsonPath("$.code").value("INVALID_ARCHIVE"));
 
 		// A traversal entry.
 		byte[] traversalZip = zipBytes(Map.of("../escape.pdf", PDF));
-		this.mockMvc.perform(multipart("/pos-records")
+		this.perform(multipart("/pos-records")
 				.file(new MockMultipartFile("file", "EREF-2026-202.zip", "application/zip", traversalZip)))
 				.andExpect(status().isUnprocessableEntity())
 				.andExpect(jsonPath("$.code").value("INVALID_ARCHIVE"));
@@ -225,7 +237,7 @@ class PosArchiveIntakeIntegrationTest {
 		java.util.Set<String> keysBefore = objectKeySet();
 
 		// First upload succeeds.
-		this.mockMvc.perform(multipart("/pos-records")
+		this.perform(multipart("/pos-records")
 				.file(new MockMultipartFile("file", "EREF-2026-301.zip", "application/zip", zipBytes)))
 				.andExpect(status().isAccepted());
 
@@ -237,7 +249,7 @@ class PosArchiveIntakeIntegrationTest {
 		byte[] firstBytes = readAll(storage.get(firstKey));
 
 		// Duplicate eRef (same normalized eRef) fails at the database step.
-		this.mockMvc.perform(multipart("/pos-records")
+		this.perform(multipart("/pos-records")
 				.file(new MockMultipartFile("file", "EREF-2026-301.zip", "application/zip", zipBytes)))
 				.andExpect(status().isConflict())
 				.andExpect(jsonPath("$.code").value("DUPLICATE_EREF_NUMBER"));
@@ -265,7 +277,7 @@ class PosArchiveIntakeIntegrationTest {
 		int objectsBefore = countMinioObjects();
 		byte[] zipBytes = zipBytes(Map.of("documents/first.pdf", PDF));
 
-		this.mockMvc.perform(multipart("/pos-records")
+		this.perform(multipart("/pos-records")
 				.file(new MockMultipartFile("file", "EREF-2026-401.zip", "application/zip", zipBytes))
 				.param("policyNumber", "   "))
 				.andExpect(status().isBadRequest())
@@ -277,7 +289,7 @@ class PosArchiveIntakeIntegrationTest {
 	@Test
 	void disallowedContentTypeIsRejectedEvenForValidZipBytes() throws Exception {
 		byte[] zipBytes = zipBytes(Map.of("documents/first.pdf", PDF));
-		this.mockMvc.perform(multipart("/pos-records")
+		this.perform(multipart("/pos-records")
 				.file(new MockMultipartFile("file", "EREF-2026-402.zip", "application/pdf", zipBytes)))
 				.andExpect(status().isUnsupportedMediaType())
 				.andExpect(jsonPath("$.code").value("UNSUPPORTED_ARCHIVE_TYPE"));
@@ -285,7 +297,7 @@ class PosArchiveIntakeIntegrationTest {
 
 	@Test
 	void missingFilePartIsRejectedWithMissingFile() throws Exception {
-		this.mockMvc.perform(multipart("/pos-records"))
+		this.perform(multipart("/pos-records"))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.code").value("MISSING_FILE"));
 	}

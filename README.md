@@ -29,6 +29,38 @@ docker compose up --build
 
 Do not commit real credentials, and do not put them in example commands.
 
+## Security (Google OIDC)
+
+The backend is protected by Google OAuth2/OIDC login. Authentication is
+**fail-closed**: in the default `google` mode the app refuses to start unless the
+Google client credentials and the subject allowlists are configured.
+
+Set these in `.env` (see `.env.example`):
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `GOOGLE_CLIENT_ID` | yes | Google OAuth client id. |
+| `GOOGLE_CLIENT_SECRET` | yes | Google OAuth client secret. |
+| `APP_SECURITY_GOOGLE_VIEWER_SUBJECTS` | yes | Comma-separated Google `sub` values granted read access. |
+| `APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS` | yes | Comma-separated Google `sub` values granted read + verify/delete/content access. |
+| `APP_SECURITY_ALLOWED_ORIGINS` | no | Comma-separated exact browser origins allowed for CORS (empty = same-origin only). |
+| `APP_SECURITY_POST_LOGIN_REDIRECT` | no | Absolute path to redirect to after login (default `/`). |
+| `APP_SECURITY_MODE` | no | `google` (default) or `stack-test`. |
+
+Register the redirect URI `http://localhost:18080/login/oauth2/code/google` in
+the Google Cloud OAuth client. The Google `sub` claim is the stable identifier
+used for the allowlists (an account's `sub` never changes).
+
+Roles:
+
+- **viewer** (`ROLE_USER`): list records, search, and read record detail.
+- **reviewer** (`ROLE_USER` + `ROLE_REVIEWER`): everything a viewer can do, plus
+  verify, delete, and open the document/source-archive content.
+
+After login, `/auth/me` returns the current user and the API uses a session cookie
+(`POSDOCSESSION`) plus an `XSRF-TOKEN` cookie for CSRF protection (state-changing
+requests must send the matching `X-XSRF-TOKEN` header).
+
 ## Ingestion behavior
 
 - `POST /api/v1/pos-records` accepts a multipart ZIP (max 10 MiB compressed)

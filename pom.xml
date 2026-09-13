@@ -45,6 +45,14 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security-oauth2-client</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-actuator</artifactId>
 		</dependency>
 		<dependency>
@@ -114,6 +122,11 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
 		<dependency>
@@ -134,6 +147,26 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<!--
+						Tests run the application in its default 'google' security mode so the
+						real filter chain and fail-closed startup validator are exercised. The
+						values below are synthetic (not real credentials); they only make the
+						OAuth2 client registration constructible and the validator pass so the
+						context can start. Security-specific tests override the allowlists and
+						mode per test; no automated test contacts Google or the LAN OCR host.
+					-->
+					<systemPropertyVariables>
+						<GOOGLE_CLIENT_ID>pos-doc-test-google-client-id</GOOGLE_CLIENT_ID>
+						<GOOGLE_CLIENT_SECRET>pos-doc-test-google-client-secret</GOOGLE_CLIENT_SECRET>
+						<APP_SECURITY_GOOGLE_VIEWER_SUBJECTS>pos-doc-test-subject-viewer</APP_SECURITY_GOOGLE_VIEWER_SUBJECTS>
+						<APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS>pos-doc-test-subject-reviewer</APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS>
+					</systemPropertyVariables>
+				</configuration>
 			</plugin>
 			<plugin>
 				<groupId>org.openapitools</groupId>

@@ -21,9 +21,11 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 import com.yourcompany.pos.api.model.Problem;
 import com.yourcompany.pos.api.model.ProblemFieldErrorsInner;
 
+import horse.sumomo.pos_doc_backend.content.DocumentContentException;
 import horse.sumomo.pos_doc_backend.ingestion.archive.ArchiveValidationException;
 import horse.sumomo.pos_doc_backend.ingestion.application.IntakeException;
 import horse.sumomo.pos_doc_backend.review.PosRecordApiException;
+import horse.sumomo.pos_doc_backend.security.AuthRequiredException;
 
 /**
  * Maps intake and HTTP failures to the generated {@link Problem} DTO with
@@ -55,6 +57,19 @@ public class ApiExceptionHandler {
 		PosRecordApiException.Code code = e.getCode();
 		log.warn("Request rejected (category={})", code.code());
 		return problem(code.httpStatus(), code.code(), code.detail());
+	}
+
+	@ExceptionHandler(DocumentContentException.class)
+	public ResponseEntity<Problem> handleDocumentContent(DocumentContentException e) {
+		DocumentContentException.Code code = e.getCode();
+		log.warn("Request rejected (category={})", code.code());
+		return problem(code.httpStatus(), code.code(), code.detail());
+	}
+
+	@ExceptionHandler(AuthRequiredException.class)
+	public ResponseEntity<Problem> handleAuthRequired(AuthRequiredException e) {
+		log.warn("Request rejected (category=authentication-required)");
+		return problem(HttpStatus.UNAUTHORIZED.value(), "AUTHENTICATION_REQUIRED", "Authentication is required.");
 	}
 
 	@ExceptionHandler(ArchiveValidationException.class)

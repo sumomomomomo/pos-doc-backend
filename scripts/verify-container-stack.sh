@@ -54,6 +54,34 @@ MINIO_BUCKET="pos-documents-test"
 RABBITMQ_USERNAME="task45-test-rabbit"
 RABBITMQ_PASSWORD="task45-test-rabbit-secret-change-me"
 
+# --- security (stack-test mode) ----------------------------------------------
+#
+# The whole-stack verifier runs the backend in the isolated, fail-closed
+# stack-test authentication mode (plan 11). A random 64-hex bearer token is
+# generated per run; every authenticated API call below sends it, and a
+# pre-happy-path check proves the same endpoint is 401 without it. The Google
+# client/subject values are inert placeholders present only to satisfy Compose
+# variable substitution (stack-test mode does not use them).
+STACK_TEST_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+GOOGLE_CLIENT_ID="stack-test-google-client-id"
+GOOGLE_CLIENT_SECRET="stack-test-google-client-secret"
+APP_SECURITY_GOOGLE_VIEWER_SUBJECTS="stack-test-viewer-subject"
+APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS="stack-test-reviewer-subject"
+# Bearer header sent with every authenticated API call.
+AUTH_HEADER="Authorization: Bearer ${STACK_TEST_TOKEN}"
+
+# The security block written to both env-file phases. It is kept as a variable
+# so the phase 2 rewrite (consumer re-enable) reproduces it exactly.
+SECURITY_ENV="""GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+APP_SECURITY_MODE=stack-test
+APP_SECURITY_GOOGLE_VIEWER_SUBJECTS=${APP_SECURITY_GOOGLE_VIEWER_SUBJECTS}
+APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS=${APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS}
+APP_SECURITY_ALLOWED_ORIGINS=
+APP_SECURITY_POST_LOGIN_REDIRECT=/
+APP_SECURITY_STACK_TEST_TOKEN=${STACK_TEST_TOKEN}
+SPRING_PROFILES_ACTIVE=stack-test"""
+
 # Create the temp env file as a path relative to the working directory so that
 # both this (POSIX) shell and native Docker resolve it identically. An MSYS
 # /tmp/... path would be translated differently by the Windows docker client.
@@ -68,6 +96,7 @@ MINIO_BUCKET=${MINIO_BUCKET}
 RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
 RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
 INGESTION_CONSUMER_ENABLED=false
+${SECURITY_ENV}
 EOF
 
 # Repository root. The script operates from here so that relative paths work
@@ -143,11 +172,13 @@ http_call() {
         curl --silent --max-time 15 --output "${_hc_body_file}" --write-out '%{http_code}' \
             --request "${_hc_method}" \
             --header "Content-Type: ${_hc_ctype}" \
+            --header "${AUTH_HEADER}" \
             --data "${_hc_data}" \
             "${_hc_url}" > "${_hc_code_file}" 2>/dev/null || true
     else
         curl --silent --max-time 15 --output "${_hc_body_file}" --write-out '%{http_code}' \
             --request "${_hc_method}" \
+            --header "${AUTH_HEADER}" \
             "${_hc_url}" > "${_hc_code_file}" 2>/dev/null || true
     fi
     HTTP_CODE="$(tr -d '[:space:]' < "${_hc_code_file}" 2>/dev/null || true)"
@@ -333,6 +364,23 @@ echo "rabbitmq: management API authenticated"
 
 # --- 12: real upload through the stack ----------------------------------------
 
+echo "== security: protected endpoint without token is 401 AUTHENTICATION_REQUIRED =="
+UNAUTH_CODE="$(curl --silent --max-time 15 --output /dev/null --write-out '%{http_code}' \
+    --request GET \
+    "http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111" 2>/dev/null || true)"
+UNAUTH_BODY="$(curl --silent --max-time 15 \
+    --request GET \
+    "http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111" 2>/dev/null || true)"
+if [ "${UNAUTH_CODE}" != "401" ]; then
+    echo "ERROR: unauthenticated protected endpoint returned http ${UNAUTH_CODE}, expected 401: ${UNAUTH_BODY}" >&2
+    exit 1
+fi
+printf '%s' "${UNAUTH_BODY}" | grep -q "AUTHENTICATION_REQUIRED" || {
+    echo "ERROR: unauthenticated 401 missing AUTHENTICATION_REQUIRED code: ${UNAUTH_BODY}" >&2
+    exit 1
+}
+echo "security: protected endpoint without token -> 401 AUTHENTICATION_REQUIRED"
+
 echo "== stack upload (committed fixture) =="
 # Relative path: the script has already cd to the repository root, so curl
 # (including Windows curl) can read the file.
@@ -340,6 +388,7 @@ FIXTURE="src/test/resources/fixtures/valid-two-pdf.zip"
 [ -f "${FIXTURE}" ] || { echo "ERROR: fixture ${FIXTURE} is missing." >&2; exit 1; }
 UPLOAD_RESPONSE_FILE="$(mktemp "pos-doc-task2-test-upload.XXXXXX")"
 UPLOAD_CODE="$(curl --silent --max-time 15 --output "${UPLOAD_RESPONSE_FILE}" --write-out '%{http_code}' \
+    --header "${AUTH_HEADER}" \
     --form "file=@${FIXTURE};filename=EREF-STACK-001.zip;type=application/zip" \
     --form "policyNumber=POLICY-STACK-001" \
     http://localhost:18080/api/v1/pos-records)"
@@ -359,7 +408,7 @@ echo "== job queryable and QUEUED =="
 i=0
 JOB_RESPONSE=""
 while [ "${i}" -lt 30 ]; do
-    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
+    JOB_RESPONSE="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
     case "${JOB_RESPONSE}" in
         *"QUEUED"*) break ;;
     esac
@@ -479,7 +528,7 @@ if [ "${STATUS}" != "healthy" ]; then
     echo "ERROR: backend did not become healthy after the second restart." >&2
     exit 1
 fi
-JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID})"
+JOB_RESPONSE="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID})"
 case "${JOB_RESPONSE}" in
     *"QUEUED"*) echo "job: still QUEUED after backend restart" ;;
     *) echo "ERROR: job no longer QUEUED after backend restart: ${JOB_RESPONSE}" >&2; exit 1 ;;
@@ -501,6 +550,7 @@ MINIO_BUCKET=${MINIO_BUCKET}
 RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
 RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
 INGESTION_CONSUMER_ENABLED=true
+${SECURITY_ENV}
 EOF
 docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml up --detach --wait backend >/dev/null
 i=0
@@ -523,7 +573,7 @@ echo "== job reaches COMPLETED with attempt_count=1 =="
 i=0
 JOB_RESPONSE=""
 while [ "${i}" -lt 60 ]; do
-    JOB_RESPONSE="$(curl --fail --silent --show-error http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
+    JOB_RESPONSE="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" http://localhost:18080/api/v1/ingestion-jobs/${JOB_ID} 2>/dev/null || true)"
     case "${JOB_RESPONSE}" in
         *"\"status\":\"COMPLETED\""*'"attemptCount":1'*) break ;;
     esac
@@ -550,7 +600,7 @@ fi
 echo "job: no terminal error"
 
 echo "== pos_document: exactly two ordered COMPLETED rows (Task 9) =="
-DOCS_RESPONSE="$(curl --fail --silent --show-error \
+DOCS_RESPONSE="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" \
     http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
 COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
 if [ "${COUNT}" != "2" ]; then
@@ -793,7 +843,7 @@ if [ "${READY}" != "0" ] || [ "${UNACKED}" != "0" ]; then
     exit 1
 fi
 # Still exactly two documents.
-DOCS_AFTER="$(curl --fail --silent --show-error \
+DOCS_AFTER="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" \
     http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
 COUNT_AFTER="$(printf '%s' "${DOCS_AFTER}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
 if [ "${COUNT_AFTER}" != "2" ]; then

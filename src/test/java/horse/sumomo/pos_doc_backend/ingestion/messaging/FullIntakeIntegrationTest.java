@@ -27,6 +27,10 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.AbstractMockHttpServletRequestBuilder;
+
+import horse.sumomo.pos_doc_backend.security.OidcTestAuth;
 
 import io.minio.MinioClient;
 import io.minio.MakeBucketArgs;
@@ -45,6 +49,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -85,6 +91,12 @@ class FullIntakeIntegrationTest {
 
 	@Autowired
 	private MockMvc mockMvc;
+
+	private ResultActions perform(AbstractMockHttpServletRequestBuilder builder) throws Exception {
+		return this.mockMvc.perform(builder
+				.with(OidcTestAuth.oidc("pos-doc-test-subject-reviewer", true))
+				.with(csrf()));
+	}
 
 	@Autowired
 	private MinioObjectStorage storage;
@@ -150,7 +162,7 @@ class FullIntakeIntegrationTest {
 		MockMultipartFile file = new MockMultipartFile("file", "EREF-TASK45-001.zip", "application/zip", zipBytes);
 
 		// 1-3. Submit the upload; expect 202, IDs, and a Location using posRecordId.
-		MvcResult result = this.mockMvc.perform(multipart("/pos-records")
+		MvcResult result = this.perform(multipart("/pos-records")
 						.file(file)
 						.param("policyNumber", "POLICY-TASK45-001"))
 				.andExpect(status().isAccepted())
@@ -215,7 +227,7 @@ class FullIntakeIntegrationTest {
 		}
 
 		// 9-10. Job still QUEUED via the real endpoint; outbox marked published.
-		this.mockMvc.perform(get("/ingestion-jobs/{jobId}", jobId))
+		this.perform(get("/ingestion-jobs/{jobId}", jobId))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("QUEUED"))
 				.andExpect(jsonPath("$.posRecordId").value(posRecordId));

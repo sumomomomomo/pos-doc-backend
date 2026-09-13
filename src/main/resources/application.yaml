@@ -38,10 +38,33 @@ spring:
     template:
       mandatory: true
 
+  # Google OIDC client. The credentials come from the environment (never from
+  # this file). The non-usable placeholders below keep the OAuth2 client
+  # repository constructible in non-google contexts (for example the isolated
+  # stack-test verifier) while google mode refuses to start on them.
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID:pos-doc-google-client-id-unset}
+            client-secret: ${GOOGLE_CLIENT_SECRET:pos-doc-google-client-secret-unset}
+            scope: openid,profile,email
+
 server:
   port: 18080
+  forward-headers-strategy: framework
   servlet:
     context-path: /api/v1
+    session:
+      timeout: 8h
+      tracking-modes: cookie
+      cookie:
+        name: POSDOCSESSION
+        http-only: true
+        secure: true
+        same-site: lax
+        path: /
 
 # The generated API interfaces carry the base path as a placeholder; it is
 # supplied via the servlet context path above, so it must be overridden to an
@@ -58,6 +81,14 @@ storage:
     bucket: ${MINIO_BUCKET:pos-documents}
 
 app:
+  security:
+    mode: ${APP_SECURITY_MODE:google}
+    google:
+      viewer-subjects: ${APP_SECURITY_GOOGLE_VIEWER_SUBJECTS:}
+      reviewer-subjects: ${APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS:}
+    allowed-origins: ${APP_SECURITY_ALLOWED_ORIGINS:}
+    post-login-redirect: ${APP_SECURITY_POST_LOGIN_REDIRECT:/}
+    stack-test-token: ${APP_SECURITY_STACK_TEST_TOKEN:}
   rendering:
     first-page:
       dpi: 200

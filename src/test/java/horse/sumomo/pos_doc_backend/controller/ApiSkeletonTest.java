@@ -1,5 +1,7 @@
 package horse.sumomo.pos_doc_backend.controller;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -7,11 +9,20 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.AbstractMockHttpServletRequestBuilder;
+
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 
 import com.yourcompany.pos.api.model.IngestionJob;
 import com.yourcompany.pos.api.model.JobStatus;
@@ -61,13 +72,37 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code application.yaml}); MockMvc does not apply the servlet context path,
  * so requests use the bare mapped paths.
  */
-@WebMvcTest(controllers = {PosRecordsController.class, IngestionJobsController.class})
+@SpringBootTest
+@AutoConfigureMockMvc
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class ApiSkeletonTest {
 
 	private static final MediaType MERGE_PATCH = MediaType.parseMediaType("application/merge-patch+json");
 
 	@Autowired
 	private MockMvc mockMvc;
+
+	@DynamicPropertySource
+	static void sqliteUrl(DynamicPropertyRegistry registry) throws Exception {
+		Path dbFile = Files.createTempFile("pos-doc-api-skeleton-test", ".db");
+		dbFile.toFile().deleteOnExit();
+		Path.of(dbFile.toString() + "-wal").toFile().deleteOnExit();
+		Path.of(dbFile.toString() + "-shm").toFile().deleteOnExit();
+		registry.add("SQLITE_URL", () -> "jdbc:sqlite:" + dbFile);
+	}
+
+	/**
+	 * Performs a MockMvc request through the real security filter chain, already
+	 * authenticated as an allowed reviewer (both {@code ROLE_USER} and
+	 * {@code ROLE_REVIEWER}) and carrying a valid CSRF token. The HTTP-layer tests
+	 * focus on the generated mappings, DTO serialization, and error mapping; the
+	 * authorization/CSRF matrix is proven by the dedicated security tests.
+	 */
+	private ResultActions perform(AbstractMockHttpServletRequestBuilder builder) throws Exception {
+		return this.mockMvc.perform(builder
+				.with(user("tester").roles("USER", "REVIEWER"))
+				.with(csrf()));
+	}
 
 	@MockitoBean
 	private PosArchiveIntakeService intakeService;
@@ -100,7 +135,7 @@ class ApiSkeletonTest {
 		MockMultipartFile file = new MockMultipartFile("file", "dummy.zip", "application/zip",
 				new byte[] {1, 2, 3, 4});
 
-		mockMvc.perform(multipart("/pos-records")
+		perform(multipart("/pos-records")
 						.file(file)
 						.param("policyNumber", "POLICY-UPLOAD-001"))
 				.andExpect(status().isAccepted())
@@ -112,7 +147,7 @@ class ApiSkeletonTest {
 
 	@Test
 	void uploadWithoutFilePartReturns400() throws Exception {
-		mockMvc.perform(multipart("/pos-records")
+		perform(multipart("/pos-records")
 						.param("policyNumber", "POLICY-UPLOAD-001"))
 				.andExpect(status().isBadRequest());
 	}
@@ -128,7 +163,7 @@ class ApiSkeletonTest {
 				List.of(summary(id, PosRecordStatus.REVIEW_REQUIRED)), 0, 20, 1L, 1);
 		when(this.searchService.search(any())).thenReturn(page);
 
-		mockMvc.perform(post("/pos-records/search")
+		perform(post("/pos-records/search")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
 				.andExpect(status().isOk())
@@ -146,7 +181,7 @@ class ApiSkeletonTest {
 
 	@Test
 	void searchInvalidSizeReturns400() throws Exception {
-		mockMvc.perform(post("/pos-records/search")
+		perform(post("/pos-records/search")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"size\":0}"))
 				.andExpect(status().isBadRequest())
@@ -155,7 +190,7 @@ class ApiSkeletonTest {
 
 	@Test
 	void searchInvalidThresholdReturns400() throws Exception {
-		mockMvc.perform(post("/pos-records/search")
+		perform(post("/pos-records/search")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"minimumNameSimilarity\":1.5}"))
 				.andExpect(status().isBadRequest())
@@ -164,7 +199,7 @@ class ApiSkeletonTest {
 
 	@Test
 	void searchBlankQueryReturns400() throws Exception {
-		mockMvc.perform(post("/pos-records/search")
+		perform(post("/pos-records/search")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"erefNumber\":\"   \"}"))
 				.andExpect(status().isBadRequest())
@@ -177,7 +212,7 @@ class ApiSkeletonTest {
 		// service maps that to INVALID_SEARCH_REQUEST, which must surface as 400.
 		when(this.searchService.search(any())).thenThrow(new PosRecordApiException(Code.INVALID_SEARCH_REQUEST));
 
-		mockMvc.perform(post("/pos-records/search")
+		perform(post("/pos-records/search")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"erefNumber\":\"---\"}"))
 				.andExpect(status().isBadRequest())
@@ -195,7 +230,7 @@ class ApiSkeletonTest {
 		UUID id = UUID.randomUUID();
 		when(this.readService.getRecord(id)).thenReturn(record(id, PosRecordStatus.REVIEW_REQUIRED, 3L));
 
-		mockMvc.perform(get("/pos-records/{id}", id))
+		perform(get("/pos-records/{id}", id))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.id").value(id.toString()))
 				.andExpect(jsonPath("$.erefNumber").value("EREF-2026-00123"))
@@ -213,7 +248,7 @@ class ApiSkeletonTest {
 		UUID id = UUID.randomUUID();
 		when(this.readService.getRecord(id)).thenThrow(new PosRecordApiException(Code.POS_RECORD_NOT_FOUND));
 
-		mockMvc.perform(get("/pos-records/{id}", id))
+		perform(get("/pos-records/{id}", id))
 				.andExpect(status().isNotFound())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(jsonPath("$.status").value(404))
@@ -222,7 +257,7 @@ class ApiSkeletonTest {
 
 	@Test
 	void getPosRecordNonUuidPathReturns400Problem() throws Exception {
-		mockMvc.perform(get("/pos-records/{id}", "not-a-uuid"))
+		perform(get("/pos-records/{id}", "not-a-uuid"))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON));
 	}
@@ -236,7 +271,7 @@ class ApiSkeletonTest {
 		UUID id = UUID.randomUUID();
 		when(this.commandService.patch(any(UUID.class), any())).thenReturn(record(id, PosRecordStatus.REVIEW_REQUIRED, 4L));
 
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"expectedVersion\":3,\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isOk())
@@ -250,7 +285,7 @@ class ApiSkeletonTest {
 		when(this.commandService.patch(any(UUID.class), any()))
 				.thenThrow(new PosRecordApiException(Code.POS_RECORD_VERSION_MISMATCH));
 
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"expectedVersion\":9,\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isPreconditionFailed())
@@ -265,7 +300,7 @@ class ApiSkeletonTest {
 		when(this.commandService.patch(any(UUID.class), any()))
 				.thenThrow(new PosRecordApiException(Code.POS_RECORD_NOT_REVIEWABLE));
 
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"expectedVersion\":0,\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isConflict())
@@ -278,7 +313,7 @@ class ApiSkeletonTest {
 		when(this.commandService.patch(any(UUID.class), any()))
 				.thenThrow(new PosRecordApiException(Code.DUPLICATE_POLICY_NUMBER));
 
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"expectedVersion\":0,\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isConflict())
@@ -289,7 +324,7 @@ class ApiSkeletonTest {
 	void updatePosRecordMissingExpectedVersionReturns400() throws Exception {
 		UUID id = UUID.randomUUID();
 
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isBadRequest())
@@ -300,7 +335,7 @@ class ApiSkeletonTest {
 	void updatePosRecordNegativeVersionReturns400() throws Exception {
 		UUID id = UUID.randomUUID();
 
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"expectedVersion\":-1,\"policyNumber\":\"P12345678\"}"))
 				.andExpect(status().isBadRequest())
@@ -315,7 +350,7 @@ class ApiSkeletonTest {
 				.thenThrow(new PosRecordApiException(Code.NO_PATCH_FIELDS));
 
 		UUID id = UUID.randomUUID();
-		mockMvc.perform(patch("/pos-records/{id}", id)
+		perform(patch("/pos-records/{id}", id)
 						.contentType(MERGE_PATCH)
 						.content("{\"expectedVersion\":0,\"erefNumber\":\"---\"}"))
 				.andExpect(status().isBadRequest())
@@ -334,7 +369,7 @@ class ApiSkeletonTest {
 		when(this.commandService.verify(any(UUID.class), any()))
 				.thenReturn(record(id, PosRecordStatus.COMPLETED, 5L));
 
-		mockMvc.perform(post("/pos-records/{id}/verification", id)
+		perform(post("/pos-records/{id}/verification", id)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"expectedVersion\":4}"))
 				.andExpect(status().isOk())
@@ -349,7 +384,7 @@ class ApiSkeletonTest {
 		when(this.commandService.verify(any(UUID.class), any()))
 				.thenThrow(new PosRecordApiException(Code.POS_RECORD_NOT_REVIEWABLE));
 
-		mockMvc.perform(post("/pos-records/{id}/verification", id)
+		perform(post("/pos-records/{id}/verification", id)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"expectedVersion\":4}"))
 				.andExpect(status().isConflict())
@@ -362,7 +397,7 @@ class ApiSkeletonTest {
 		when(this.commandService.verify(any(UUID.class), any()))
 				.thenThrow(new PosRecordApiException(Code.POS_RECORD_VERSION_MISMATCH));
 
-		mockMvc.perform(post("/pos-records/{id}/verification", id)
+		perform(post("/pos-records/{id}/verification", id)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"expectedVersion\":0}"))
 				.andExpect(status().isPreconditionFailed())
@@ -375,7 +410,7 @@ class ApiSkeletonTest {
 		when(this.commandService.verify(any(UUID.class), any()))
 				.thenThrow(new PosRecordApiException(Code.POS_RECORD_INCOMPLETE));
 
-		mockMvc.perform(post("/pos-records/{id}/verification", id)
+		perform(post("/pos-records/{id}/verification", id)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{\"expectedVersion\":0}"))
 				.andExpect(status().isUnprocessableEntity())
@@ -386,7 +421,7 @@ class ApiSkeletonTest {
 	void verifyPosRecordMissingExpectedVersionReturns400() throws Exception {
 		UUID id = UUID.randomUUID();
 
-		mockMvc.perform(post("/pos-records/{id}/verification", id)
+		perform(post("/pos-records/{id}/verification", id)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
 				.andExpect(status().isBadRequest())
@@ -401,7 +436,7 @@ class ApiSkeletonTest {
 	void deletePosRecordReturns204WithEmptyBody() throws Exception {
 		UUID id = UUID.randomUUID();
 
-		mockMvc.perform(delete("/pos-records/{id}", id))
+		perform(delete("/pos-records/{id}", id))
 				.andExpect(status().isNoContent())
 				.andExpect(content().string(""));
 	}
@@ -412,7 +447,7 @@ class ApiSkeletonTest {
 		org.mockito.Mockito.doThrow(new PosRecordApiException(Code.POS_RECORD_NOT_FOUND))
 				.when(this.commandService).delete(id);
 
-		mockMvc.perform(delete("/pos-records/{id}", id))
+		perform(delete("/pos-records/{id}", id))
 				.andExpect(status().isNotFound())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(jsonPath("$.code").value("POS_RECORD_NOT_FOUND"));
@@ -427,7 +462,7 @@ class ApiSkeletonTest {
 		UUID id = UUID.randomUUID();
 		when(this.documentListService.listDocuments(any(UUID.class))).thenReturn(List.of());
 
-		mockMvc.perform(get("/pos-records/{id}/documents", id))
+		perform(get("/pos-records/{id}/documents", id))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.length()").value(0));
 	}
@@ -444,7 +479,7 @@ class ApiSkeletonTest {
 				OffsetDateTime.parse("2026-01-02T03:04:05Z"));
 		when(this.ingestionJobReadService.getJob(jobId)).thenReturn(job);
 
-		mockMvc.perform(get("/ingestion-jobs/{jobId}", jobId))
+		perform(get("/ingestion-jobs/{jobId}", jobId))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.id").value(jobId.toString()))
 				.andExpect(jsonPath("$.posRecordId").value(posRecordId.toString()))
@@ -458,7 +493,7 @@ class ApiSkeletonTest {
 		when(this.ingestionJobReadService.getJob(jobId))
 				.thenThrow(new IntakeException(IntakeException.Code.INGESTION_JOB_NOT_FOUND));
 
-		mockMvc.perform(get("/ingestion-jobs/{jobId}", jobId))
+		perform(get("/ingestion-jobs/{jobId}", jobId))
 				.andExpect(status().isNotFound())
 				.andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
 				.andExpect(jsonPath("$.status").value(404))
@@ -479,7 +514,7 @@ class ApiSkeletonTest {
 		when(this.intakeService.intake(any(), any()))
 				.thenThrow(new IntakeException(IntakeException.Code.ARCHIVE_TOO_LARGE));
 
-		mockMvc.perform(multipart("/pos-records").file(zipFile("EREF-OVER.zip", new byte[] {1})))
+		perform(multipart("/pos-records").file(zipFile("EREF-OVER.zip", new byte[] {1})))
 				.andExpect(status().isPayloadTooLarge())
 				.andExpect(jsonPath("$.code").value("ARCHIVE_TOO_LARGE"));
 	}
@@ -490,7 +525,7 @@ class ApiSkeletonTest {
 				.thenThrow(new ArchiveValidationException(
 						ArchiveValidationException.Category.UNSUPPORTED_ARCHIVE_TYPE, "not a zip"));
 
-		mockMvc.perform(multipart("/pos-records").file(zipFile("EREF-UNSUP.zip", new byte[] {1})))
+		perform(multipart("/pos-records").file(zipFile("EREF-UNSUP.zip", new byte[] {1})))
 				.andExpect(status().isUnsupportedMediaType())
 				.andExpect(jsonPath("$.code").value("UNSUPPORTED_ARCHIVE_TYPE"));
 	}
@@ -501,7 +536,7 @@ class ApiSkeletonTest {
 				.thenThrow(new ArchiveValidationException(
 						ArchiveValidationException.Category.INVALID_ARCHIVE, "bad archive"));
 
-		mockMvc.perform(multipart("/pos-records").file(zipFile("EREF-BAD.zip", new byte[] {1})))
+		perform(multipart("/pos-records").file(zipFile("EREF-BAD.zip", new byte[] {1})))
 				.andExpect(status().isUnprocessableEntity())
 				.andExpect(jsonPath("$.code").value("INVALID_ARCHIVE"));
 	}
@@ -511,7 +546,7 @@ class ApiSkeletonTest {
 		when(this.intakeService.intake(any(), any()))
 				.thenThrow(new IntakeException(IntakeException.Code.DUPLICATE_EREF_NUMBER));
 
-		mockMvc.perform(multipart("/pos-records")
+		perform(multipart("/pos-records")
 						.file(zipFile("EREF-DUP.zip", new byte[] {1}))
 						.param("policyNumber", "POLICY-DUP-001"))
 				.andExpect(status().isConflict())
@@ -524,7 +559,7 @@ class ApiSkeletonTest {
 				.thenThrow(new IntakeException(IntakeException.Code.INGESTION_INTAKE_FAILED,
 						new RuntimeException("sqlite: UNIQUE constraint failed: eref=EREF-SECRET-001, key=archives/x/y.zip")));
 
-		mockMvc.perform(multipart("/pos-records")
+		perform(multipart("/pos-records")
 						.file(zipFile("EREF-SECRET-001.zip", new byte[] {1}))
 						.param("policyNumber", "POLICY-SECRET-001"))
 				.andExpect(status().isInternalServerError())

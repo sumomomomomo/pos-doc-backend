@@ -5,6 +5,8 @@ import java.util.UUID;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import horse.sumomo.pos_doc_backend.persistence.entity.PosRecordEntity;
 
@@ -23,6 +25,10 @@ public interface PosRecordRepository extends JpaRepository<PosRecordEntity, UUID
 		JpaSpecificationExecutor<PosRecordEntity> {
 
 	Optional<PosRecordEntity> findByIdAndDeletedAtIsNull(UUID id);
+
+	@Query("SELECT r FROM PosRecordEntity r JOIN FETCH r.sourceArchive "
+			+ "WHERE r.id = :posRecordId AND r.deletedAt IS NULL")
+	Optional<PosRecordEntity> findActiveRecordWithSourceArchive(@Param("posRecordId") UUID posRecordId);
 
 	Optional<PosRecordEntity> findByErefNumberNormalizedAndDeletedAtIsNull(String normalized);
 

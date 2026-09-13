@@ -13,12 +13,58 @@ info:
 servers:
   - url: /api/v1
 security:
-  - bearerAuth: []
+  - cookieAuth: []
 tags:
+  - name: Authentication
   - name: POS records
   - name: Ingestion jobs
 
 paths:
+  /auth/me:
+    get:
+      tags: [Authentication]
+      operationId: getCurrentUser
+      summary: Get the authenticated current user
+      description: |
+        Returns the verified email, display name, and application roles of the
+        authenticated user established by Google OpenID Connect. The response is
+        never cached; accessing it materializes the CSRF token cookie so the
+        browser can immediately issue protected mutations.
+      responses:
+        '200':
+          description: The authenticated current user.
+          headers:
+            Cache-Control:
+              description: Cache policy for the response.
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logoutCurrentUser
+      summary: Log out the authenticated user
+      description: |
+        Invalidates the server-side session and clears the session and CSRF
+        cookies. Requires a valid CSRF token. Returns an empty body.
+      responses:
+        '204':
+          description: Logged out; the session is invalidated.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /pos-records:
     post:
       tags: [POS records]
@@ -217,6 +263,72 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /pos-records/{posRecordId}/documents/{documentId}/content:
+    parameters:
+      - $ref: '#/components/parameters/PosRecordId'
+      - name: documentId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [POS records]
+      operationId: getPosDocumentContent
+      summary: Stream an extracted PDF
+      description: |
+        Streams the extracted PDF for the given document through the backend.
+        The document must belong to the active POS record; a document under
+        another record is not revealed. The object key is never accepted from
+        the client.
+      responses:
+        '200':
+          description: The PDF document content.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pos-records/{posRecordId}/source-archive/content:
+    parameters:
+      - $ref: '#/components/parameters/PosRecordId'
+    get:
+      tags: [POS records]
+      operationId: getPosSourceArchiveContent
+      summary: Stream the original ZIP archive
+      description: |
+        Streams the original uploaded ZIP archive through the backend. The
+        bucket and object key are never accepted from the client.
+      responses:
+        '200':
+          description: The original ZIP archive content.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /pos-records/{posRecordId}/verification:
     parameters:
       - $ref: '#/components/parameters/PosRecordId'
@@ -288,11 +400,11 @@ paths:
 
 components:
   securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: JWT issued after Google OpenID Connect authentication.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: POSDOCSESSION
+      description: Opaque server-side session established by Google OIDC login.
 
   parameters:
     PosRecordId:
@@ -363,6 +475,30 @@ components:
         status:
           type: string
           const: UPLOADED
+
+    AppRole:
+      type: string
+      enum: [USER, REVIEWER]
+
+    CurrentUser:
+      type: object
+      additionalProperties: false
+      required: [email, displayName, roles]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 256
+        roles:
+          type: array
+          uniqueItems: true
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AppRole'
 
     StorageObjectSummary:
       type: object
@@ -736,6 +872,12 @@ components:
             $ref: '#/components/schemas/Problem'
     UnprocessableContent:
       description: The archive or update is syntactically valid but cannot be processed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: A dependency (for example object storage) is temporarily unavailable.
       content:
         application/problem+json:
           schema:

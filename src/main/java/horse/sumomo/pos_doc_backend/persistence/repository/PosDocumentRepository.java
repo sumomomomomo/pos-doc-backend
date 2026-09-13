@@ -39,6 +39,23 @@ public interface PosDocumentRepository extends JpaRepository<PosDocumentEntity, 
 	 */
 	@Query("""
 			SELECT d FROM PosDocumentEntity d
+			JOIN FETCH d.storageObject
+			JOIN d.posRecord r
+			WHERE d.id = :documentId
+			AND r.id = :posRecordId
+			AND r.deletedAt IS NULL
+			""")
+	Optional<PosDocumentEntity> findActiveDocumentWithStorageByRecordAndId(@Param("posRecordId") UUID posRecordId,
+			@Param("documentId") UUID documentId);
+
+	/**
+	 * Fetches a single document by its id with its {@code posRecord} and
+	 * {@code storageObject} associations eagerly joined so the rendering
+	 * pipeline can read all required metadata inside one short read-only
+	 * transaction and then close it before any MinIO or PDFBox operation.
+	 */
+	@Query("""
+			SELECT d FROM PosDocumentEntity d
 			JOIN FETCH d.posRecord
 			JOIN FETCH d.storageObject
 			WHERE d.id = :documentId

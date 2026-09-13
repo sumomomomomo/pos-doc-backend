@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -49,12 +50,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 		webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
 		properties = {
 				"app.messaging.outbox.enabled=false",
-				"app.ingestion.consumer.enabled=false"
+				"app.ingestion.consumer.enabled=false",
+				"app.security.mode=stack-test"
 		})
+@ActiveProfiles("stack-test")
 @DirtiesContext
 class UploadSizeRealHttpRejectionTest {
 
 	private static final int OVERSIZE_BYTES = 10 * 1024 * 1024 + 1;
+
+	/**
+	 * A fresh random 64-hex stack-test credential, generated per test JVM and
+	 * never committed. It is the only way to authenticate a raw-TCP request in the
+	 * isolated stack-test filter chain.
+	 */
+	private static final String STACK_TEST_TOKEN = generateStackTestToken();
+
+	private static String generateStackTestToken() {
+		byte[] bytes = new byte[32];
+		new java.security.SecureRandom().nextBytes(bytes);
+		return java.util.HexFormat.of().formatHex(bytes);
+	}
 
 	@LocalServerPort
 	private int port;
@@ -69,6 +85,7 @@ class UploadSizeRealHttpRejectionTest {
 		Path.of(dbFile.toString() + "-wal").toFile().deleteOnExit();
 		Path.of(dbFile.toString() + "-shm").toFile().deleteOnExit();
 		registry.add("SQLITE_URL", () -> "jdbc:sqlite:" + dbFile);
+		registry.add("app.security.stack-test-token", () -> STACK_TEST_TOKEN);
 	}
 
 	@Test
@@ -84,6 +101,7 @@ class UploadSizeRealHttpRejectionTest {
 		conn.setRequestMethod("POST");
 		conn.setDoOutput(true);
 		conn.setRequestProperty("Accept", "application/problem+json");
+		conn.setRequestProperty("Authorization", "Bearer " + STACK_TEST_TOKEN);
 
 		String filename = "EREF-REAL-HTTP-OVERSIZE-001.zip";
 		String boundary = "----test-boundary-9c8f";
