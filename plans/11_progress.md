@@ -11,8 +11,10 @@ Baseline before changes: 513 tests green (`./mvnw clean verify`), HEAD `48fb9a8`
 - [x] `./mvnw -B -ntp clean verify` (run 1) — **605 tests, 0 failures, 0 errors, BUILD SUCCESS** (~59s).
 - [x] `docker compose --env-file <stack-test env> config --quiet` — COMPOSE CONFIG OK (security vars wired; `SPRING_PROFILES_ACTIVE` passthrough).
 - [x] `sh -n scripts/verify-container-stack.sh` — SYNTAX OK (stack-test mode, generated 64-hex bearer token, auth header on all API calls, pre-happy-path 401 check).
-- [ ] `scripts/verify-container-stack.sh` — pending (needs Docker + full stack + OCR stub).
-- [ ] secret scan of tracked content
+- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (stack-test mode; backend health UP; 401 AUTHENTICATION_REQUIRED without the token; full ingestion + Task 10 smoke flow green with the bearer token). One fix during the run: the viewer/reviewer dummy subjects must be distinct (the validator rejects a subject in both lists), and the 401-body curl must capture stdout (not `/dev/null`).
+- [x] secret scan of tracked content — no real credentials/tokens in the diff (only env-var references, `change-me`/`your-`/`test-`/`stack-test` placeholders, and per-run generated tokens); `target/` and `.env` remain gitignored.
+
+Final: committed `30ee2b8` (44 files), pushed to `origin/main` (`48fb9a8..30ee2b8`).
 
 ## Steps
 1. [x] Inspect repo; record generated signatures + MinIO API
@@ -27,7 +29,7 @@ Baseline before changes: 513 tests green (`./mvnw clean verify`), HEAD `48fb9a8`
 10. [x] DocumentContentService (descriptor + MinIO streaming outside tx) + tests (`DocumentContentServiceTest`, 8)
 11. [x] Stack-test auth mode (profile + 64-hex token, constant-time) + tests
 12. [x] compose.yaml, .env.example, README, verify-container-stack.sh
-13. [ ] Run all verifications, commit intended files
+13. [x] Run all verifications, commit intended files
 
 ## Notes / deviations
 - **Boot 4 removed `@MockBean`/`@SpyBean`**: the filter-chain test uses `org.springframework.test.context.bean.override.mockito.MockitoBean`; the content test builds a manual Mockito `spy(...)` to observe the MinIO call outside a transaction.
