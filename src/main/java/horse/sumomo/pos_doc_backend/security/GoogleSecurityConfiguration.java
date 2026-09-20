@@ -17,8 +17,11 @@ import org.springframework.security.oauth2.client.userinfo.OAuth2UserService;
 import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
 import org.springframework.security.oauth2.core.oidc.user.DefaultOidcUser;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
+import org.springframework.security.web.DefaultRedirectStrategy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.SimpleUrlAuthenticationSuccessHandler;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
@@ -76,7 +79,7 @@ public class GoogleSecurityConfiguration {
 				.requireCsrfProtectionMatcher(allButSearchPost()))
 			.oauth2Login(oauth2 -> oauth2
 				.userInfoEndpoint(info -> info.oidcUserService(allowlistingOidcUserService(authorizer)))
-				.defaultSuccessUrl(properties.postLoginRedirect(), true))
+				.successHandler(frontendSuccessHandler(properties.postLoginRedirect())))
 			.logout(logout -> logout
 				.logoutRequestMatcher(isPost("/auth/logout"))
 				// The CsrfLogoutHandler added by the CSRF configurer clears the
@@ -266,6 +269,36 @@ public class GoogleSecurityConfiguration {
 			List<GrantedAuthority> authorities = authorizer.authoritiesFor(defaultUser.getIdToken());
 			return new DefaultOidcUser(authorities, defaultUser.getIdToken(), defaultUser.getUserInfo());
 		};
+	}
+
+	/**
+	 * Success handler that redirects a freshly authenticated browser to the frontend
+	 * subpage (for example {@code /pos/}).
+	 *
+	 * <p>The backend is served under the {@code /api/v1} servlet context path, so a
+	 * plain {@code defaultSuccessUrl("/pos/", true)} would resolve the target against
+	 * the context path and redirect to {@code /api/v1/pos/} — a path the backend does
+	 * not host and therefore rejects with {@code 403}. The intended destination is the
+	 * frontend route {@code /pos/} at the site root, outside the backend context path.
+	 *
+	 * <p>A {@link DefaultRedirectStrategy} with {@code contextRelative(true)} emits
+	 * {@code Location: /pos/} (no context-path prefix). The default target URL is always
+	 * used (never a saved request), so a crafted backend request cannot override the
+	 * intended frontend destination — the same guarantee the previous
+	 * {@code defaultSuccessUrl(target, true)} call provided.
+	 *
+	 * <p>Package-visible (not private) so the redirect target can be regression-tested
+	 * directly against a request carrying the {@code /api/v1} context path.
+	 */
+	static AuthenticationSuccessHandler frontendSuccessHandler(String targetUrl) {
+		DefaultRedirectStrategy redirectStrategy = new DefaultRedirectStrategy();
+		redirectStrategy.setContextRelative(true);
+
+		SimpleUrlAuthenticationSuccessHandler handler =
+				new SimpleUrlAuthenticationSuccessHandler(targetUrl);
+		handler.setAlwaysUseDefaultTargetUrl(true);
+		handler.setRedirectStrategy(redirectStrategy);
+		return handler;
 	}
 
 	private static CorsConfigurationSource corsConfigurationSource(SecurityProperties properties) {
