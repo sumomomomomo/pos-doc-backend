@@ -2,11 +2,9 @@ package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -21,7 +19,6 @@ import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
@@ -46,36 +43,30 @@ import horse.sumomo.pos_doc_backend.ingestion.api.RabbitTopologyProperties;
 import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessage;
 import horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
+import horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub;
 import horse.sumomo.pos_doc_backend.rendering.service.PdfFirstPageRenderer;
 import horse.sumomo.pos_doc_backend.rendering.service.StoredPdfMaterializer;
 import horse.sumomo.pos_doc_backend.rendering.service.TempFileFactory;
-import horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * End-to-end integration test for Task 9: real temporary SQLite, real
- * test MinIO, real RabbitMQ test container, and an ephemeral fake
- * llama.cpp HTTP server.
+ * End-to-end integration test for the structured field-extraction workflow:
+ * real temporary SQLite, real test MinIO, real RabbitMQ test container, real
+ * PDFBox renderer (synthetic PDFs), and an ephemeral fake llama.cpp HTTP server.
  *
- * <p>Proves the complete flow with one ZIP containing two valid PDFs
- * created by {@link SyntheticPdfFactory}:
+ * <p>Proves the complete flow with one ZIP containing a {@code LAPPe.pdf}
+ * candidate and one other PDF:
  * <ol>
- *   <li>The existing message triggers extraction.</li>
- *   <li>Two pos_document rows and their storage objects exist.</li>
- *   <li>The fake OCR server receives exactly two requests on ordinary
- *       success.</li>
- *   <li>Two version-1 OCR results are stored with the expected synthetic
- *       text and safe metadata.</li>
- *   <li>Both documents become COMPLETED.</li>
- *   <li>The ingestion job becomes COMPLETED.</li>
- *   <li>The POS record becomes REVIEW_REQUIRED, not COMPLETED.</li>
- *   <li>Redelivering the same message performs zero additional OCR
- *       requests and creates no duplicate rows. Deterministic ACK
- *       evidence: wait for the job to remain COMPLETED and the OCR
- *       request count to remain stable after the redelivery is
- *       consumed.</li>
- *   <li>No temporary rendered PNG remains in the test-specific render
- *       directory after the workflow finishes.</li>
+ *   <li>The message triggers extraction of two PDFs.</li>
+ *   <li>The candidate (the {@code LAPPe.pdf}) is COMPLETED; the non-candidate
+ *       is SKIPPED.</li>
+ *   <li>The OCR server receives exactly three requests (one per business field),
+ *       each carrying the exact field prompt.</li>
+ *   <li>Three version-2 {@code pos_field_extraction} rows are stored and the
+ *       business fields are applied to the record.</li>
+ *   <li>The ingestion job is COMPLETED and the record is REVIEW_REQUIRED.</li>
+ *   <li>Redelivering the same message performs zero additional OCR requests and
+ *       creates no duplicate rows.</li>
  * </ol>
  */
 @SpringBootTest(properties = {
@@ -83,22 +74,18 @@ import tools.jackson.databind.json.JsonMapper;
 		"app.ingestion.consumer.enabled=true"
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-class DocumentOcrEndToEndIntegrationTest {
+class FieldExtractionEndToEndIntegrationTest {
 
-	private static final String TEST_BUCKET = "pos-documents-ocr-e2e-test";
+	private static final String TEST_BUCKET = "pos-documents-field-e2e-test";
 	private static final DockerImageName MINIO_IMAGE =
 			DockerImageName.parse("cgr.dev/chainguard/minio:latest").asCompatibleSubstituteFor("minio/minio");
-	private static final byte[] PDF_A = SyntheticPdfFactory.createPdf("Doc A");
-	private static final byte[] PDF_B = SyntheticPdfFactory.createPdf("Doc B");
-	private static final String SYNTHETIC_OCR_TEXT = "SYNTHETIC OCR TEXT";
+	private static final byte[] PDF_CANDIDATE = SyntheticPdfFactory.createPdf("LAPPe Doc");
+	private static final byte[] PDF_OTHER = SyntheticPdfFactory.createPdf("Other Doc");
 
 	private static MinIOContainer minio;
 	private static RabbitMQContainer rabbit;
 	private static MinioClient adminClient;
 	private static OcrHttpStub ocrStub;
-
-	@Autowired
-	private TempFileFactory testTempFileFactory;
 
 	@Autowired
 	private RabbitTemplate rabbitTemplate;
@@ -118,8 +105,8 @@ class DocumentOcrEndToEndIntegrationTest {
 	@DynamicPropertySource
 	static void containerProperties(DynamicPropertyRegistry registry) throws Exception {
 		minio = new MinIOContainer(MINIO_IMAGE)
-				.withUserName("ocr-e2e-access-key")
-				.withPassword("ocr-e2e-secret-change-me");
+				.withUserName("field-e2e-access-key")
+				.withPassword("field-e2e-secret-change-me");
 		minio.start();
 		adminClient = MinioClient.builder()
 				.endpoint(minio.getS3URL())
@@ -130,7 +117,7 @@ class DocumentOcrEndToEndIntegrationTest {
 		rabbit = new RabbitMQContainer(DockerImageName.parse("rabbitmq:4.3.5-management"));
 		rabbit.start();
 
-		ocrStub = new OcrHttpStub(SYNTHETIC_OCR_TEXT, 200, "application/json");
+		ocrStub = new OcrHttpStub("SYNTHETIC OCR TEXT", 200, "application/json");
 
 		registry.add("storage.minio.endpoint", minio::getS3URL);
 		registry.add("storage.minio.access-key", minio::getUserName);
@@ -142,14 +129,11 @@ class DocumentOcrEndToEndIntegrationTest {
 		registry.add("spring.rabbitmq.username", rabbit::getAdminUsername);
 		registry.add("spring.rabbitmq.password", rabbit::getAdminPassword);
 
-		// Point the OCR client at the ephemeral stub.
 		registry.add("app.ocr.llama-cpp.server-origin", ocrStub::getServerOrigin);
 
-		Path sqliteDbFile = Files.createTempFile("pos-doc-ocr-e2e-test", ".db");
+		Path sqliteDbFile = Files.createTempFile("pos-doc-field-e2e-test", ".db");
 		sqliteDbFile.toFile().deleteOnExit();
-		Path.of(sqliteDbFile.toString() + "-wal").toFile().deleteOnExit();
-		Path.of(sqliteDbFile.toString() + "-shm").toFile().deleteOnExit();
-		registry.add("SQLITE_URL", () -> "jdbc:sqlite:" + sqliteDbFile);
+		registry.add("spring.datasource.url", () -> "jdbc:sqlite:" + sqliteDbFile.toAbsolutePath());
 	}
 
 	@AfterAll
@@ -169,19 +153,15 @@ class DocumentOcrEndToEndIntegrationTest {
 	}
 
 	@Test
-	void endToEndOcrWorkflowCompletesAllDocumentsAndJob() throws Exception {
-		// The test-owned render temp directory is injected via
-		// @TestConfiguration (see TestRenderConfig below). We assert
-		// it is empty after the workflow completes.
-
+	void endToEndFieldExtractionCompletesCandidateAndJob() throws Exception {
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
 		UUID eventId = UUID.randomUUID();
 		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
 
-		// Upload the ZIP and set up the metadata rows.
+		// Upload the ZIP (a LAPPe.pdf candidate + one other PDF) and the metadata.
 		String objectKey = "archives/" + posRecordId + "/" + UUID.randomUUID() + ".zip";
-		byte[] zipBytes = zipBytes(Map.of("first.pdf", PDF_A, "second.pdf", PDF_B));
+		byte[] zipBytes = zipBytes(Map.of("LAPPe.pdf", PDF_CANDIDATE, "other.pdf", PDF_OTHER));
 		try (var in = new ByteArrayInputStream(zipBytes)) {
 			this.storage.put(objectKey, in, zipBytes.length, "application/zip");
 		}
@@ -190,7 +170,7 @@ class DocumentOcrEndToEndIntegrationTest {
 		UUID storageObjectId = UUID.randomUUID();
 		this.jdbc.update("INSERT INTO storage_object (id, object_key, original_filename, content_type, "
 				+ "byte_size, sha256, created_at_epoch_ms) VALUES (?,?,?,?,?,?,?)", storageObjectId.toString(),
-				objectKey, "EREF-OCR-E2E.zip", "application/zip", zipBytes.length, sha256,
+				objectKey, "EREF-FIELD-E2E.zip", "application/zip", zipBytes.length, sha256,
 				occurredAt.toEpochMilli());
 		this.jdbc.update("INSERT INTO pos_record (id, source_archive_id, status, uploaded_by, "
 				+ "uploaded_at_epoch_ms, updated_at_epoch_ms, version) VALUES (?,?,?,?,?,?,?)",
@@ -200,10 +180,16 @@ class DocumentOcrEndToEndIntegrationTest {
 				+ "created_at_epoch_ms, version) VALUES (?,?,?,?,?,?)", jobId.toString(),
 				posRecordId.toString(), "QUEUED", 0L, occurredAt.toEpochMilli(), 0L);
 
+		// Queue the three field responses (fixed workflow order: policyholder,
+		// consultant, date) so each field resolves on its first attempt.
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
 		// Publish the ingestion message.
 		send(jobId, posRecordId, eventId, occurredAt);
 
-		// Wait for the job to reach COMPLETED.
+		// Wait for the job to reach a terminal status.
 		AtomicReference<String> finalJobStatus = new AtomicReference<>();
 		await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(250)).until(() -> {
 			String s = this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
@@ -213,89 +199,70 @@ class DocumentOcrEndToEndIntegrationTest {
 		});
 		assertEquals("COMPLETED", finalJobStatus.get(), "Job must reach COMPLETED");
 
-		// 1. Two pos_document rows exist.
+		// Two pos_document rows exist.
 		int docCount = this.jdbc.queryForObject("SELECT count(*) FROM pos_document WHERE pos_record_id = ?",
 				Integer.class, posRecordId.toString());
 		assertEquals(2, docCount, "Two pos_document rows must exist");
 
-		// 2. Two storage objects for the PDFs exist.
-		int pdfStorageCount = this.jdbc.queryForObject(
-				"SELECT count(*) FROM storage_object WHERE object_key LIKE ?", Integer.class,
-				"documents/" + posRecordId + "/%");
-		assertEquals(2, pdfStorageCount, "Two PDF storage objects must exist");
+		// Exactly three OCR requests (one per business field).
+		assertEquals(3, ocrStub.getRequestCount(), "OCR server must receive exactly three requests");
 
-		// 3. The fake OCR server received exactly two requests.
-		assertEquals(2, ocrStub.getRequestCount(), "OCR server must receive exactly two requests");
+		// The candidate (LAPPe.pdf) is COMPLETED; the other (other.pdf) is SKIPPED.
+		String candidateStatus = this.jdbc.queryForObject(
+				"SELECT d.processing_status FROM pos_document d "
+						+ "JOIN storage_object s ON d.storage_object_id = s.id "
+						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'lappe.pdf'",
+				String.class, posRecordId.toString());
+		assertEquals("COMPLETED", candidateStatus, "the LAPPe.pdf candidate must be COMPLETED");
+		String otherStatus = this.jdbc.queryForObject(
+				"SELECT d.processing_status FROM pos_document d "
+						+ "JOIN storage_object s ON d.storage_object_id = s.id "
+						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'other.pdf'",
+				String.class, posRecordId.toString());
+		assertEquals("SKIPPED", otherStatus, "the non-candidate must be SKIPPED");
 
-		// 4. Two version-1 OCR results are stored with the expected text.
-		int ocrResultCount = this.jdbc.queryForObject(
-				"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1", Integer.class);
-		assertEquals(2, ocrResultCount, "Two version-1 OCR results must exist");
+		// Three version-2 durable outcomes for the candidate.
+		String candidateId = this.jdbc.queryForObject(
+				"SELECT d.id FROM pos_document d JOIN storage_object s ON d.storage_object_id = s.id "
+						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'lappe.pdf'",
+				String.class, posRecordId.toString());
+		int outcomeCount = this.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND prompt_version = 2",
+				Integer.class, candidateId);
+		assertEquals(3, outcomeCount, "three version-2 outcomes must exist for the candidate");
 
-		String ocrText = this.jdbc.queryForObject(
-				"SELECT ocr_text FROM document_ocr_result WHERE prompt_version = 1 LIMIT 1", String.class);
-		assertEquals(SYNTHETIC_OCR_TEXT, ocrText, "OCR text must match the synthetic text");
+		// Business fields applied (canonical values).
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, posRecordId.toString()));
+		assertEquals("John Davidson", this.jdbc.queryForObject(
+				"SELECT consultant_name FROM pos_record WHERE id = ?", String.class, posRecordId.toString()));
+		assertEquals("2026-07-26", this.jdbc.queryForObject(
+				"SELECT policy_create_date FROM pos_record WHERE id = ?", String.class, posRecordId.toString()));
 
-		// 5. Both documents become COMPLETED.
-		int completedDocs = this.jdbc.queryForObject(
-				"SELECT count(*) FROM pos_document WHERE pos_record_id = ? AND processing_status = 'COMPLETED'",
-				Integer.class, posRecordId.toString());
-		assertEquals(2, completedDocs, "Both documents must be COMPLETED");
+		// Job COMPLETED, record REVIEW_REQUIRED (not COMPLETED).
+		assertEquals("REVIEW_REQUIRED", this.jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?",
+				String.class, posRecordId.toString()));
 
-		// 6. The ingestion job is COMPLETED.
-		assertEquals("COMPLETED", this.jdbc.queryForObject(
-				"SELECT status FROM ingestion_job WHERE id = ?", String.class, jobId.toString()));
-
-		// 7. The POS record becomes REVIEW_REQUIRED, not COMPLETED.
-		String recordStatus = this.jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?", String.class,
-				posRecordId.toString());
-		assertEquals("REVIEW_REQUIRED", recordStatus, "POS record must be REVIEW_REQUIRED");
-
-		// 8. Redelivering the same message performs zero additional OCR
-		//    requests and creates no duplicate rows.
-		int ocrCountBeforeRedelivery = ocrStub.getRequestCount();
-		int ocrResultCountBeforeRedelivery = this.jdbc.queryForObject(
-				"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1", Integer.class);
-
+		// Redelivering performs zero additional OCR requests and no duplicates.
+		int ocrCountBefore = ocrStub.getRequestCount();
+		int outcomeCountBefore = this.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM pos_field_extraction", Integer.class);
 		send(jobId, posRecordId, UUID.randomUUID(), occurredAt);
 
-		// Deterministic ACK evidence: wait until both the ready AND
-		// unacknowledged counts reach zero (proving the redelivery was
-		// fully consumed and ACKed, not just sitting unacknowledged).
-		// RabbitMQ Channel.messageCount() reports only ready messages;
-		// getQueueProperties() reports both ready and unacknowledged.
 		await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(250)).until(() -> {
 			long[] counts = queueReadyAndUnacked(this.rabbitTemplate, topology.queue());
 			if (counts[0] != 0 || counts[1] != 0) {
 				return false;
 			}
-			// Both ready and unacknowledged are zero; verify the job is
-			// still COMPLETED (the redelivery was consumed and the
-			// idempotent no-op completed without changing the job state).
 			String s = this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
 					jobId.toString());
 			return "COMPLETED".equals(s);
 		});
 
-		assertEquals(ocrCountBeforeRedelivery, ocrStub.getRequestCount(),
-				"Redelivery must perform zero additional OCR requests");
-		assertEquals(ocrResultCountBeforeRedelivery, this.jdbc.queryForObject(
-				"SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1", Integer.class),
-				"Redelivery must create no duplicate OCR results");
-
-		// 9. No temporary rendered files remain in the test-owned temp
-		//    directory after the workflow finishes. The PdfFirstPageRenderer
-		//    and StoredPdfMaterializer use the injected TempFileFactory
-		//    (see TestRenderConfig) which writes to a test-owned directory
-		//    created at bean initialization.
-		Path testDir = this.testTempFileFactory.createTempFile("probe", ".probe");
-		Files.deleteIfExists(testDir);
-		Path parentDir = testDir.getParent();
-		try (var stream = Files.list(parentDir)) {
-			long fileCount = stream.count();
-			assertEquals(0, fileCount,
-					"Test-owned render temp directory must be empty after processing");
-		}
+		assertEquals(ocrCountBefore, ocrStub.getRequestCount(), "redelivery must make zero new OCR requests");
+		assertEquals(outcomeCountBefore, this.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM pos_field_extraction", Integer.class),
+				"redelivery must create no duplicate outcome rows");
 	}
 
 	private void send(UUID jobId, UUID posRecordId, UUID eventId, Instant occurredAt) throws Exception {
@@ -311,41 +278,24 @@ class DocumentOcrEndToEndIntegrationTest {
 		this.rabbitTemplate.send(topology.exchange(), topology.routingKey(), new Message(payload, props));
 	}
 
-	private static long queueDepth(RabbitTemplate template, String queue) {
-		try {
-			com.rabbitmq.client.Connection conn = template.getConnectionFactory().createConnection().getDelegate();
-			com.rabbitmq.client.Channel ch = conn.createChannel();
-			long count = ch.messageCount(queue);
-			ch.close();
-			return count;
-		}
-		catch (Exception e) {
-			throw new AssertionError("queue depth check failed", e);
-		}
-	}
-
-	/**
-	 * Returns both the ready and unacknowledged message counts for a queue
-	 * using the RabbitMQ management HTTP API.
-	 * Index 0 = messages_ready, index 1 = messages_unacknowledged.
-	 */
 	private static long[] queueReadyAndUnacked(RabbitTemplate template, String queue) {
 		try {
 			int mgmtPort = rabbit.getMappedPort(15672);
 			java.net.URL url = new java.net.URL(
-					"http://" + rabbit.getHost() + ":" + mgmtPort + "/api/queues/%2F/" + java.net.URLEncoder.encode(queue, java.nio.charset.StandardCharsets.UTF_8));
+					"http://" + rabbit.getHost() + ":" + mgmtPort + "/api/queues/%2F/"
+							+ java.net.URLEncoder.encode(queue, java.nio.charset.StandardCharsets.UTF_8));
 			java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
 			conn.setRequestMethod("GET");
 			conn.setRequestProperty("Authorization",
 					"Basic " + java.util.Base64.getEncoder().encodeToString(
-							(rabbit.getAdminUsername() + ":" + rabbit.getAdminPassword()).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+							(rabbit.getAdminUsername() + ":" + rabbit.getAdminPassword())
+									.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
 			if (conn.getResponseCode() != 200) {
 				throw new AssertionError("Management API returned " + conn.getResponseCode());
 			}
 			String body = new String(conn.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-			long ready = parseJsonLong(body, "messages_ready");
-			long unacked = parseJsonLong(body, "messages_unacknowledged");
-			return new long[] { ready, unacked };
+			return new long[] { parseJsonLong(body, "messages_ready"),
+					parseJsonLong(body, "messages_unacknowledged") };
 		}
 		catch (AssertionError e) {
 			throw e;
@@ -392,9 +342,9 @@ class DocumentOcrEndToEndIntegrationTest {
 	}
 
 	/**
-	 * Overrides the rendering beans to use a test-owned temp directory
-	 * for temp file creation. The directory is created at bean
-	 * initialization and deleted when the context is closed.
+	 * Overrides the rendering beans to use a test-owned temp directory (mirrors
+	 * the previous OCR e2e test). Not strictly asserted here, but keeps temp file
+	 * creation isolated from the host temp directory.
 	 */
 	@TestConfiguration
 	static class TestRenderConfig {
@@ -404,7 +354,7 @@ class DocumentOcrEndToEndIntegrationTest {
 		@Bean
 		@Primary
 		TempFileFactory testTempFileFactory() throws java.io.IOException {
-			this.testTempDir = Files.createTempDirectory("pos-doc-e2e-render-");
+			this.testTempDir = Files.createTempDirectory("pos-doc-field-e2e-render-");
 			return TempFileFactory.inDirectory(this.testTempDir);
 		}
 

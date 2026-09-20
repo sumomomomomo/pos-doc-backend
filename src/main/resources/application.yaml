@@ -109,10 +109,16 @@ app:
       max-image-bytes: 33554432
       max-response-bytes: 2097152
       max-ocr-characters: 1000000
-      max-tokens: 4096
-      temperature: 0.1
+      # Single-value structured answers need only a small completion budget.
+      max-tokens: 128
+      # Deterministic inference for single-value field extraction.
+      temperature: 0.0
       top-p: 0.9
       max-concurrent-requests: 1
+      # Bounded per-field HTTP retries: at most 3 total attempts (1 + 2 retries).
+      max-attempts: 3
+      # Bounded backoff between internal per-field retry attempts.
+      retry-backoff-ms: 250
   upload:
     max-compressed-bytes: 10485760
     max-uncompressed-bytes: 262144000

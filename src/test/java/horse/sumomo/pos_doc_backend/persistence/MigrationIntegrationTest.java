@@ -35,7 +35,8 @@ class MigrationIntegrationTest {
 			"pos_document",
 			"ingestion_job",
 			"outbox_event",
-			"document_ocr_result");
+			"document_ocr_result",
+			"pos_field_extraction");
 
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
@@ -50,7 +51,7 @@ class MigrationIntegrationTest {
 	}
 
 	@Test
-	void flywayHistoryContainsExactlyTheSuccessfulMigrationsVersion1Through3() {
+	void flywayHistoryContainsExactlyTheSuccessfulMigrationsVersion1Through4() {
 		Boolean historyExists = this.jdbcTemplate.queryForObject(
 				"SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'flyway_schema_history'",
 				Boolean.class);
@@ -59,8 +60,8 @@ class MigrationIntegrationTest {
 		List<Integer> successfulVersions = this.jdbcTemplate.query(
 				"SELECT version FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank",
 				(rs, rowNum) -> rs.getInt(1));
-		assertEquals(List.of(1, 2, 3), successfulVersions,
-				"exactly migration versions 1, 2, and 3 must be successful");
+		assertEquals(List.of(1, 2, 3, 4), successfulVersions,
+				"exactly migration versions 1, 2, 3, and 4 must be successful");
 	}
 
 	@Test
@@ -82,6 +83,7 @@ class MigrationIntegrationTest {
 				foreignKeysOf("pos_document"));
 		assertEquals(Set.of("pos_record_id->pos_record.id"), foreignKeysOf("ingestion_job"));
 		assertEquals(Set.of("document_id->pos_document.id"), foreignKeysOf("document_ocr_result"));
+		assertEquals(Set.of("document_id->pos_document.id"), foreignKeysOf("pos_field_extraction"));
 		assertEquals(Set.of(), foreignKeysOf("storage_object"));
 
 		// No stored row violates any foreign key.

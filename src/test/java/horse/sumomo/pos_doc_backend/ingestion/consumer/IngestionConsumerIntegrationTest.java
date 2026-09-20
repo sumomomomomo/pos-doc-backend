@@ -202,7 +202,8 @@ class IngestionConsumerIntegrationTest {
 		assertEquals(0, ((Number) docs.get(0).get("sequence_number")).intValue());
 		assertEquals(1, ((Number) docs.get(1).get("sequence_number")).intValue());
 		assertEquals("UNKNOWN", docs.get(0).get("document_type"));
-		assertEquals("COMPLETED", docs.get(0).get("processing_status"));
+		// No LAPPe.pdf in this archive -> no candidate, so the document is SKIPPED.
+		assertEquals("SKIPPED", docs.get(0).get("processing_status"));
 
 		String recordStatus = this.jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?", String.class,
 				posRecordId.toString());

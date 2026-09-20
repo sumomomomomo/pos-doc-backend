@@ -150,6 +150,37 @@ re-adds only the one port the reverse proxy needs and pins the security mode:
 - Storage metadata, the POS record, the ingestion job, and the outbox event are
   committed in a single SQLite transaction.
 
+## Structured field extraction
+
+Once a job is dequeued, the consumer extracts three business fields from a single
+candidate document and applies the resolved values to the POS record. This
+replaces the old "OCR every PDF" workflow:
+
+- **Candidate selection** — exactly one document is chosen and rendered:
+  - 1 PDF → that PDF.
+  - 2–10 PDFs → the first `LAPPe.pdf` (case-insensitive basename match); if none
+    is present, **no** candidate is selected and no OCR is performed.
+  - More than 10 PDFs → the first PDF (deterministic fallback).
+- **Render once** — the candidate's first page is rendered to PNG a single time
+  and reused across all three fields.
+- **Three structured calls** — one HTTP request per field (policyholder name,
+  consultant name, submission date), each sent with its own exact prompt
+  (prompt version 2). The calls are deterministic: temperature `0`, `max_tokens` `128`.
+- **Bounded per-field retry** — each field gets up to 3 attempts (1 + 2 retries)
+  with a short bounded back-off before a terminal outcome is recorded.
+- **Durable outcomes** — each (document, field, prompt version) result is
+  persisted to `pos_field_extraction` as `RESOLVED` (with the validated value),
+  `UNKNOWN` (absent/unreadable), or `FAILED` (a stable, PII-free error code).
+  Values are canonicalized (names trimmed and bounded; the submission date
+  `dd-MMM-yyyy` is validated and stored as ISO `yyyy-MM-dd`).
+- **Best-effort** — a field that is `UNKNOWN` or `FAILED` leaves the record's
+  business field `NULL`; it does **not** fail the job. Resolved values are
+  applied to the record. The record always ends `REVIEW_REQUIRED` (human review
+  is still required).
+- **Non-candidates are skipped** — documents other than the candidate are marked
+  `SKIPPED` and are never rendered or sent to the OCR service.
+- **Worst-case budget** — 3 fields × 3 attempts × ~10 s per request ≈ **90 s**.
+
 ## Message queueing and outbox
 
 - RabbitMQ carries **identifiers only** (event, job, and POS record IDs, a

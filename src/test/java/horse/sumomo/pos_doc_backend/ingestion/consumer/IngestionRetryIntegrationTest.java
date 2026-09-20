@@ -60,8 +60,8 @@ import horse.sumomo.pos_doc_backend.infrastructure.minio.ObjectStorageException;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Real-broker integration coverage for the three end-to-end Task 6
- * acceptance criteria that involve the listener container:
+ * Real-broker integration coverage for the listener-container retry
+ * criteria:
  *
  * <ol>
  *   <li>Transient storage failure followed by a successful retry — the
@@ -73,6 +73,13 @@ import tools.jackson.databind.json.JsonMapper;
  *   <li>Malformed message — the message must land on the DLQ and the
  *       database must not be mutated for any job that the producer
  *       referenced.</li>
+ *   <li>OCR transient (503) failures — absorbed <em>internally</em> by
+ *       the structured workflow (bounded per-field retries); the job
+ *       still {@code COMPLETED} and the fields are best-effort
+ *       {@code FAILED}.</li>
+ *   <li>OCR non-retryable (400) failure — absorbed internally; the job
+ *       still {@code COMPLETED} and the fields are best-effort
+ *       {@code FAILED}.</li>
  * </ol>
  *
  * <p>A {@link MinioObjectStorage} override bean intercepts the
@@ -359,9 +366,9 @@ class IngestionRetryIntegrationTest {
 
 	@Test
 	@Order(4)
-	void ocr503ThenSuccessRetriesThroughRealBrokerAndCompletes() throws Exception {
+	void ocrTransientFailuresAreAbsorbedInternallyAndJobCompletes() throws Exception {
 		transientFailuresRemaining.set(0);
-		ocrStub.resetResponses();
+		ocrStub.reset();
 
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
@@ -369,10 +376,10 @@ class IngestionRetryIntegrationTest {
 		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
 		prepareJob(posRecordId, jobId, occurredAt);
 
-		// Queue: 503 (first doc fails), then two 200s for both docs on retry.
-		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
-		ocrStub.enqueueResponse("OCR FIRST", 200, "application/json");
-		ocrStub.enqueueResponse("OCR SECOND", 200, "application/json");
+		// Every OCR request fails with a transient 503. The workflow
+		// absorbs these internally (3 bounded attempts per field) and
+		// still completes the job; the fields are best-effort FAILED.
+		ocrStub.setNextResponse("SYNTHETIC OCR TEXT", 503, "application/json");
 
 		long ocrBefore = ocrStub.getRequestCount();
 		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
@@ -381,13 +388,19 @@ class IngestionRetryIntegrationTest {
 		send(jobId, posRecordId, eventId, occurredAt);
 
 		awaitTerminalJob(jobId);
-		assertEquals("COMPLETED", jobStatus(jobId));
-		assertEquals(2, jobAttemptCount(jobId), "attempt_count must be 2 after one retry");
+		assertEquals("COMPLETED", jobStatus(jobId), "OCR failures are best-effort; the job must complete");
+		assertEquals(1, jobAttemptCount(jobId),
+				"internal OCR retries must not consume consumer attempts");
 		assertEquals("REVIEW_REQUIRED", recordStatus(posRecordId));
 		assertEquals(2, documentCount(posRecordId));
-		assertEquals(2, completedDocumentCount(posRecordId));
-		assertEquals(2, ocrResultCount(posRecordId, 1));
-		assertEquals(3, ocrStub.getRequestCount() - ocrBefore, "OCR delta must be 3 (1 fail + 2 success)");
+		assertEquals(1, completedDocumentCount(posRecordId), "candidate COMPLETED, non-candidate SKIPPED");
+		// 3 fields x 3 bounded attempts = 9 OCR requests for the candidate.
+		assertEquals(9, ocrStub.getRequestCount() - ocrBefore,
+				"OCR delta must be 9 (3 fields x 3 attempts)");
+		assertEquals(3, failedFieldOutcomeCount(posRecordId),
+				"three durable FAILED outcomes for the candidate");
+		assertEquals(0, ocrResultCount(posRecordId, 1),
+				"the legacy document_ocr_result table is unused");
 
 		// Await broker settlement: main queue back to baseline, DLQ unchanged.
 		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
@@ -396,19 +409,19 @@ class IngestionRetryIntegrationTest {
 				"no DLQ message expected");
 
 		// Error fields must be NULL on successful completion.
-		String errorCode = this.jdbc.queryForObject(
-				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		String errorMsg = this.jdbc.queryForObject(
-				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		assertNull(errorCode, "error_code must be NULL on COMPLETED job");
-		assertNull(errorMsg, "error_message must be NULL on COMPLETED job");
+		assertNull(this.jdbc.queryForObject(
+				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString()),
+				"error_code must be NULL on a COMPLETED job");
+		assertNull(this.jdbc.queryForObject(
+				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString()),
+				"error_message must be NULL on a COMPLETED job");
 	}
 
 	@Test
 	@Order(5)
-	void ocr503ExhaustionFailsJobAndDeadLettersOnce() throws Exception {
+	void ocrNonRetryableFailureIsAbsorbedAndJobCompletes() throws Exception {
 		transientFailuresRemaining.set(0);
-		ocrStub.resetResponses();
+		ocrStub.reset();
 
 		UUID posRecordId = UUID.randomUUID();
 		UUID jobId = UUID.randomUUID();
@@ -416,10 +429,10 @@ class IngestionRetryIntegrationTest {
 		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
 		prepareJob(posRecordId, jobId, occurredAt);
 
-		// Queue three 503s so all three attempts fail on the first document.
-		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
-		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
-		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
+		// Every OCR request fails with a non-retryable 400. Each field
+		// fails on its first attempt; the workflow absorbs it and the
+		// job still completes (best-effort).
+		ocrStub.setNextResponse("SYNTHETIC OCR TEXT", 400, "application/json");
 
 		long ocrBefore = ocrStub.getRequestCount();
 		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
@@ -428,131 +441,16 @@ class IngestionRetryIntegrationTest {
 		send(jobId, posRecordId, eventId, occurredAt);
 
 		awaitTerminalJob(jobId);
-		assertEquals("FAILED", jobStatus(jobId));
-		assertEquals(3, jobAttemptCount(jobId), "attempt_count must reach max-attempts=3");
-		assertEquals("FAILED", recordStatus(posRecordId));
-		assertEquals(3, ocrStub.getRequestCount() - ocrBefore, "OCR delta must be 3 (one per attempt)");
-		assertEquals(0, ocrResultCount(posRecordId, 1), "no OCR results should be persisted");
-		assertEquals(0, completedDocumentCount(posRecordId));
-
-		// Await broker settlement: DLQ must reach baseline+1, main queue back to baseline.
-		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
-				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) == dlqBefore + 1L);
-		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
-				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == mainBefore);
-		assertEquals(dlqBefore + 1, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
-				"exactly one DLQ message expected");
-
-		// Exact stable error code for retryable OCR exhaustion.
-		String errorCode = this.jdbc.queryForObject(
-				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		assertEquals("EXTRACTION_TRANSIENT_FAILURE", errorCode,
-				"retryable OCR exhaustion must use EXTRACTION_TRANSIENT_FAILURE");
-		String errorMsg = this.jdbc.queryForObject(
-				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		if (errorMsg != null) {
-			assertFalse(errorMsg.contains("SYNTHETIC OCR TEXT"),
-					"error_message must not contain OCR text");
-		}
-	}
-
-	@Test
-	@Order(6)
-	void ocr400IsNotRetriedAndIsDeadLettered() throws Exception {
-		transientFailuresRemaining.set(0);
-		ocrStub.resetResponses();
-
-		UUID posRecordId = UUID.randomUUID();
-		UUID jobId = UUID.randomUUID();
-		UUID eventId = UUID.randomUUID();
-		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
-		prepareJob(posRecordId, jobId, occurredAt);
-
-		// Queue: 400 (non-retryable), then a 200 tripwire that must NOT be consumed.
-		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 400, "application/json");
-		ocrStub.enqueueResponse("TRIPWIRE SHOULD NOT BE USED", 200, "application/json");
-
-		long ocrBefore = ocrStub.getRequestCount();
-		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
-		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
-
-		send(jobId, posRecordId, eventId, occurredAt);
-
-		awaitTerminalJob(jobId);
-		assertEquals("FAILED", jobStatus(jobId));
-		assertEquals(1, jobAttemptCount(jobId), "non-retryable failure must not retry");
-		assertEquals("FAILED", recordStatus(posRecordId));
-		assertEquals(1, ocrStub.getRequestCount() - ocrBefore,
-				"OCR delta must be 1 (tripwire response must remain unconsumed)");
-		assertEquals(0, ocrResultCount(posRecordId, 1));
-		assertEquals(0, completedDocumentCount(posRecordId));
-
-		// Await broker settlement.
-		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
-				.until(() -> queueDepth(this.rabbitTemplate, topology.deadLetterQueue()) == dlqBefore + 1L);
-		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
-				.until(() -> queueDepth(this.rabbitTemplate, topology.queue()) == mainBefore);
-		assertEquals(dlqBefore + 1, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
-				"exactly one DLQ message expected");
-
-		// Exact stable error code for non-retryable OCR failure.
-		String errorCode = this.jdbc.queryForObject(
-				"SELECT error_code FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		assertEquals("EXTRACTION_STATE_CONFLICT", errorCode,
-				"non-retryable OCR failure must use EXTRACTION_STATE_CONFLICT");
-		String errorMsg = this.jdbc.queryForObject(
-				"SELECT error_message FROM ingestion_job WHERE id = ?", String.class, jobId.toString());
-		if (errorMsg != null) {
-			assertFalse(errorMsg.contains("SYNTHETIC OCR TEXT"),
-					"error_message must not contain OCR text");
-			assertFalse(errorMsg.contains("TRIPWIRE SHOULD NOT BE USED"),
-					"error_message must not contain tripwire text");
-		}
-	}
-
-	@Test
-	@Order(7)
-	void retryAfterSecondDocumentFailureDoesNotReOcrFirstDocument() throws Exception {
-		transientFailuresRemaining.set(0);
-		ocrStub.resetResponses();
-
-		UUID posRecordId = UUID.randomUUID();
-		UUID jobId = UUID.randomUUID();
-		UUID eventId = UUID.randomUUID();
-		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
-		prepareJob(posRecordId, jobId, occurredAt);
-
-		// Queue: 200 (doc 1 succeeds), 503 (doc 2 fails), 200 (doc 2 retry succeeds).
-		// Doc 1 must NOT be re-OCRed on attempt 2.
-		ocrStub.enqueueResponse("OCR DOCUMENT ONE", 200, "application/json");
-		ocrStub.enqueueResponse("SYNTHETIC OCR TEXT", 503, "application/json");
-		ocrStub.enqueueResponse("OCR DOCUMENT TWO", 200, "application/json");
-
-		long ocrBefore = ocrStub.getRequestCount();
-		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
-		long mainBefore = queueDepth(this.rabbitTemplate, topology.queue());
-
-		send(jobId, posRecordId, eventId, occurredAt);
-
-		awaitTerminalJob(jobId);
-		assertEquals("COMPLETED", jobStatus(jobId));
-		assertEquals(2, jobAttemptCount(jobId));
+		assertEquals("COMPLETED", jobStatus(jobId),
+				"non-retryable OCR failures are best-effort; the job must complete");
+		assertEquals(1, jobAttemptCount(jobId));
 		assertEquals("REVIEW_REQUIRED", recordStatus(posRecordId));
 		assertEquals(2, documentCount(posRecordId));
-		assertEquals(2, completedDocumentCount(posRecordId));
-		assertEquals(2, ocrResultCount(posRecordId, 1));
-		// Delta must be 3, not 4: doc 1 is NOT re-OCRed on attempt 2.
+		// 3 fields x 1 non-retryable attempt = 3 OCR requests.
 		assertEquals(3, ocrStub.getRequestCount() - ocrBefore,
-				"OCR delta must be 3 (doc1 + doc2-fail + doc2-retry), not 4");
-
-		// Verify both documents have exactly one version-1 OCR result each.
-		// The OCR delta of 3 (not 4) proves document 1 was not re-OCRed.
-		Integer resultCount = this.jdbc.queryForObject(
-				"SELECT count(*) FROM document_ocr_result r "
-						+ "JOIN pos_document d ON d.id = r.document_id "
-						+ "WHERE d.pos_record_id = ? AND r.prompt_version = 1",
-				Integer.class, posRecordId.toString());
-		assertEquals(2, resultCount, "exactly two version-1 OCR results expected");
+				"OCR delta must be 3 (3 fields x 1 non-retryable attempt)");
+		assertEquals(3, failedFieldOutcomeCount(posRecordId));
+		assertEquals(0, ocrResultCount(posRecordId, 1));
 
 		// Await broker settlement.
 		await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
@@ -561,7 +459,7 @@ class IngestionRetryIntegrationTest {
 				"no DLQ message expected");
 	}
 
-	// --- helper methods for OCR retry tests -----------------------------------
+	// --- helper methods --------------------------------------------------------
 
 	private String jobStatus(UUID jobId) {
 		return this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
@@ -593,6 +491,15 @@ class IngestionRetryIntegrationTest {
 		return count != null ? count : 0;
 	}
 
+	private int failedFieldOutcomeCount(UUID posRecordId) {
+		Integer count = this.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM pos_field_extraction r "
+						+ "JOIN pos_document d ON d.id = r.document_id "
+						+ "WHERE d.pos_record_id = ? AND r.outcome = 'FAILED'",
+				Integer.class, posRecordId.toString());
+		return count != null ? count : 0;
+	}
+
 	private int ocrResultCount(UUID posRecordId, int promptVersion) {
 		Integer count = this.jdbc.queryForObject(
 				"SELECT count(*) FROM document_ocr_result r "
@@ -611,7 +518,9 @@ class IngestionRetryIntegrationTest {
 
 	private void prepareJob(UUID posRecordId, UUID jobId, Instant occurredAt) throws Exception {
 		String objectKey = "archives/" + posRecordId + "/" + UUID.randomUUID() + ".zip";
-		byte[] zipBytes = zipBytes(Map.of("first.pdf", PDF_A, "second.pdf", PDF_B));
+		// A LAPPe.pdf candidate + one other PDF, so the structured workflow has a
+		// candidate and makes OCR requests.
+		byte[] zipBytes = zipBytes(Map.of("LAPPe.pdf", PDF_A, "other.pdf", PDF_B));
 		// Use the admin client directly to bypass the intercepting
 		// wrapper so the archive upload is not subject to the
 		// transient-failure counter.

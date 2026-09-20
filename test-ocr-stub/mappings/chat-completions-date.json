@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/v1/chat/completions",
+    "bodyPatterns": [
+      {
+        "matchesJsonPath": {
+          "expression": "$.messages[0].content[1].text",
+          "equalTo": "Return only the Submission Date shown in this document, formatted exactly as dd-MMM-yyyy using English month abbreviations. Example output: 26-Jul-2026. If the field is absent, unreadable, or ambiguous, return exactly UNKNOWN."
+        }
+      }
+    ]
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"26-Jul-2026\"},\"finish_reason\":\"stop\"}]}"
+  }
+}

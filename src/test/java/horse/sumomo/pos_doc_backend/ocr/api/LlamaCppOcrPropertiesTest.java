@@ -40,6 +40,8 @@ class LlamaCppOcrPropertiesTest {
 		assertEquals(0.1, props.temperature(), 0.0001);
 		assertEquals(0.9, props.topP(), 0.0001);
 		assertEquals(1, props.maxConcurrentRequests());
+		assertEquals(3, props.maxAttempts());
+		assertEquals(0L, props.retryBackoffMs());
 	}
 
 	@Test
@@ -54,119 +56,119 @@ class LlamaCppOcrPropertiesTest {
 	void invalidSchemeIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties("ftp://192.168.1.34:8080", PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void userInfoIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties("http://user:pass@192.168.1.34:8080", PRODUCTION_PATH,
-						PRODUCTION_MODEL, CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						PRODUCTION_MODEL, CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void queryIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties("http://192.168.1.34:8080?debug=true", PRODUCTION_PATH,
-						PRODUCTION_MODEL, CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						PRODUCTION_MODEL, CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void fragmentIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties("http://192.168.1.34:8080#frag", PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void nonEmptyOriginPathIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties("http://192.168.1.34:8080/some/path", PRODUCTION_PATH,
-						PRODUCTION_MODEL, CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						PRODUCTION_MODEL, CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void blankModelIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, "  ",
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void blankChatCompletionsPathIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, "  ", PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void differentChatCompletionsPathIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, "/v1/completions", PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void zeroConnectTimeoutIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						Duration.ZERO, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						Duration.ZERO, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void negativeReadTimeoutIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, Duration.ofSeconds(-1), CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, Duration.ofSeconds(-1), CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void zeroCallTimeoutIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, Duration.ZERO, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, Duration.ZERO, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void connectTimeoutGreaterThanCallTimeoutIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						Duration.ofSeconds(310), READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						Duration.ofSeconds(310), READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void connectTimeoutEqualToCallTimeoutIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CALL, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CALL, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void readTimeoutGreaterThanCallTimeoutIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, Duration.ofSeconds(311), CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, Duration.ofSeconds(311), CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void zeroMaxImageBytesIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 0L, 2097152L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 0L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void zeroMaxResponseBytesIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 0L, 1000000, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 0L, 1000000, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void zeroMaxOcrCharactersIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 0, 4096, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 0, 4096, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
@@ -198,52 +200,52 @@ class LlamaCppOcrPropertiesTest {
 	void maxTokensBelowOneIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 0, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 0, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void maxTokensAbove8192IsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 8193, 0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 8193, 0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void temperatureBelowZeroIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, -0.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, -0.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void temperatureAboveTwoIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 2.1, 0.9, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 2.1, 0.9, 1, 3, 0));
 	}
 
 	@Test
 	void topPAtZeroIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.0, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.0, 1, 3, 0));
 	}
 
 	@Test
 	void topPAboveOneIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 1.1, 1));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 1.1, 1, 3, 0));
 	}
 
 	@Test
 	void maxConcurrentRequestsOtherThanOneIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 2));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 2, 3, 0));
 		assertThrows(IllegalArgumentException.class,
 				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 0));
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 0, 3, 0));
 	}
 
 	@Test
@@ -269,7 +271,7 @@ class LlamaCppOcrPropertiesTest {
 	void loopbackOriginIsAccepted() {
 		LlamaCppOcrProperties props = new LlamaCppOcrProperties(
 				"http://127.0.0.1:12345", PRODUCTION_PATH, PRODUCTION_MODEL,
-				CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1);
+				CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, 0);
 		assertEquals("127.0.0.1", props.serverOrigin().getHost());
 		assertEquals(12345, props.serverOrigin().getPort());
 	}
@@ -279,7 +281,28 @@ class LlamaCppOcrPropertiesTest {
 			int maxConcurrent) {
 		return new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
 				connect, read, call, maxImageBytes, maxResponseBytes, maxOcrChars, maxTokens, temp, topP,
-				maxConcurrent);
+				maxConcurrent, 3, 0);
+	}
+
+	@Test
+	void maxAttemptsBelowOneIsRejected() {
+		assertThrows(IllegalArgumentException.class,
+				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 0, 0));
+	}
+
+	@Test
+	void maxAttemptsAboveThreeIsRejected() {
+		assertThrows(IllegalArgumentException.class,
+				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 4, 0));
+	}
+
+	@Test
+	void negativeRetryBackoffIsRejected() {
+		assertThrows(IllegalArgumentException.class,
+				() -> new LlamaCppOcrProperties(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
+						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, 4096, 0.1, 0.9, 1, 3, -1));
 	}
 
 }

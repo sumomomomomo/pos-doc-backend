@@ -140,13 +140,13 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 
 		assertEquals(page.documentId(), result.documentId());
 		assertEquals(SYNTHETIC_OCR_TEXT, result.text());
 		assertEquals(MODEL, result.model());
 		assertEquals("stop", result.finishReason());
-		assertEquals(1, result.promptVersion());
+		assertEquals(2, result.promptVersion());
 
 		assertEquals(1, this.recordedRequests.size());
 		RecordedRequest req = this.recordedRequests.get(0);
@@ -185,7 +185,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 		assertEquals(SYNTHETIC_OCR_TEXT, result.text());
 	}
 
@@ -202,7 +202,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 		assertEquals(SYNTHETIC_OCR_TEXT, result.text());
 	}
 
@@ -217,7 +217,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page));
+		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page, PROMPT, 2));
 		assertEquals(OcrException.Code.OCR_PROTOCOL_ERROR, e.getCode());
 	}
 
@@ -344,7 +344,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClientWithPort(unusedPort);
-		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page));
+		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page, PROMPT, 2));
 		assertEquals(OcrException.Code.OCR_SERVICE_UNAVAILABLE, e.getCode());
 	}
 
@@ -392,7 +392,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 		assertEquals(SYNTHETIC_OCR_TEXT, result.text());
 	}
 
@@ -457,7 +457,7 @@ class LlamaCppOcrClientTest {
 		LlamaCppOcrProperties props = new LlamaCppOcrProperties(
 				"http://127.0.0.1:" + this.port, "/v1/chat/completions", MODEL,
 				Duration.ofSeconds(5), Duration.ofSeconds(300), Duration.ofSeconds(310),
-				33554432L, this.maxResponseBytes, 1000, 4096, 0.1, 0.9, 1);
+				33554432L, this.maxResponseBytes, 1000, 4096, 0.1, 0.9, 1, 3, 0);
 		OkHttpClient httpClient = new OkHttpClient.Builder()
 				.connectTimeout(Duration.ofMillis(5000))
 				.readTimeout(Duration.ofMillis(300000))
@@ -467,7 +467,7 @@ class LlamaCppOcrClientTest {
 				.proxy(java.net.Proxy.NO_PROXY)
 				.build();
 		LlamaCppOcrClient client = new LlamaCppOcrClient(httpClient, props);
-		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page));
+		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page, PROMPT, 2));
 		assertEquals(OcrException.Code.OCR_RESPONSE_INVALID, e.getCode());
 	}
 
@@ -530,7 +530,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 		assertEquals(SYNTHETIC_OCR_TEXT, result.text());
 	}
 
@@ -550,7 +550,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page));
+		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page, PROMPT, 2));
 		assertEquals(OcrException.Code.OCR_RESPONSE_TOO_LARGE, e.getCode());
 	}
 
@@ -568,7 +568,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 		assertEquals(longText, result.text());
 	}
 
@@ -590,7 +590,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 		assertNotNull(result);
 	}
 
@@ -613,7 +613,7 @@ class LlamaCppOcrClientTest {
 			AtomicReference<Throwable> firstError = new AtomicReference<>();
 			executor.submit(() -> {
 				try {
-					client.recognize(page);
+					client.recognize(page, PROMPT, 2);
 				}
 				catch (Throwable t) {
 					firstError.set(t);
@@ -633,7 +633,7 @@ class LlamaCppOcrClientTest {
 			executor.submit(() -> {
 				secondStarted.countDown();
 				try {
-					client.recognize(page);
+					client.recognize(page, PROMPT, 2);
 				}
 				catch (Throwable t) {
 					secondError.set(t);
@@ -685,7 +685,7 @@ class LlamaCppOcrClientTest {
 		try {
 			executor.submit(() -> {
 				try {
-					client.recognize(page);
+					client.recognize(page, PROMPT, 2);
 				}
 				catch (Throwable ignored) {
 				}
@@ -711,7 +711,7 @@ class LlamaCppOcrClientTest {
 			final AtomicBoolean interruptFlagRestored = new AtomicBoolean(false);
 			Thread secondThread = new Thread(() -> {
 				try {
-					client.recognize(page);
+					client.recognize(page, PROMPT, 2);
 				}
 				catch (Throwable t) {
 					// Record the interrupt flag immediately after catching.
@@ -759,7 +759,7 @@ class LlamaCppOcrClientTest {
 			assertTrue(firstDone.await(10, TimeUnit.SECONDS), "First request did not complete");
 
 			// Perform another OCR call to prove no semaphore permit leaked.
-			OcrResult result = client.recognize(page);
+			OcrResult result = client.recognize(page, PROMPT, 2);
 			assertNotNull(result);
 		}
 		finally {
@@ -775,7 +775,7 @@ class LlamaCppOcrClientTest {
 		RenderedFirstPage page = new RenderedFirstPage(UUID.randomUUID(), pngPath, 100, 100, 200, pngBytes.length);
 
 		LlamaCppOcrClient client = createClient();
-		OcrResult result = client.recognize(page);
+		OcrResult result = client.recognize(page, PROMPT, 2);
 
 		// toString must not contain OCR text.
 		String str = result.toString();
@@ -787,7 +787,7 @@ class LlamaCppOcrClientTest {
 		this.nextResponseStatus = 500;
 		this.nextResponseJson = "";
 		this.nextResponseContentType = "application/json";
-		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page));
+		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page, PROMPT, 2));
 		assertFalse(e.getMessage().contains(SYNTHETIC_OCR_TEXT));
 		assertFalse(e.getMessage().contains("192.168.1.34"));
 		assertFalse(e.getMessage().contains("data:image/png"));
@@ -805,7 +805,7 @@ class LlamaCppOcrClientTest {
 
 	private void assertOcrException(RenderedFirstPage page, OcrException.Code expectedCode) {
 		LlamaCppOcrClient client = createClient();
-		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page));
+		OcrException e = assertThrows(OcrException.class, () -> client.recognize(page, PROMPT, 2));
 		assertEquals(expectedCode, e.getCode());
 	}
 
@@ -1021,7 +1021,7 @@ class LlamaCppOcrClientTest {
 		LlamaCppOcrProperties props = new LlamaCppOcrProperties(
 				"http://127.0.0.1:" + port, "/v1/chat/completions", MODEL,
 				Duration.ofSeconds(5), Duration.ofSeconds(300), Duration.ofSeconds(310),
-				33554432L, this.maxResponseBytes, 1000000, 4096, 0.1, 0.9, 1);
+				33554432L, this.maxResponseBytes, 1000000, 4096, 0.1, 0.9, 1, 3, 0);
 		OkHttpClient httpClient = new OkHttpClient.Builder()
 				.connectTimeout(Duration.ofMillis(5000))
 				.readTimeout(Duration.ofMillis(300000))

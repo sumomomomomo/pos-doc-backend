@@ -9,10 +9,9 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import horse.sumomo.pos_doc_backend.ingestion.application.ExtractionBackoff;
 import horse.sumomo.pos_doc_backend.ocr.client.LlamaCppOcrClient;
-import horse.sumomo.pos_doc_backend.ocr.application.FirstPageOcrService;
 import horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties;
-import horse.sumomo.pos_doc_backend.rendering.application.FirstPageRenderPreparationService;
 import okhttp3.OkHttpClient;
 
 /**
@@ -55,9 +54,8 @@ public class OcrConfiguration {
 	}
 
 	@Bean
-	public FirstPageOcrService firstPageOcrService(FirstPageRenderPreparationService renderPreparationService,
-			LlamaCppOcrClient ocrClient) {
-		return new FirstPageOcrService(renderPreparationService, ocrClient);
+	public ExtractionBackoff extractionBackoff() {
+		return ExtractionBackoff.realTime();
 	}
 
 }
