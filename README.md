@@ -41,15 +41,21 @@ Set these in `.env` (see `.env.example`):
 | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | yes | Google OAuth client id. |
 | `GOOGLE_CLIENT_SECRET` | yes | Google OAuth client secret. |
-| `APP_SECURITY_GOOGLE_VIEWER_SUBJECTS` | yes | Comma-separated Google `sub` values granted read access. |
-| `APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS` | yes | Comma-separated Google `sub` values granted read + verify/delete/content access. |
+| `APP_SECURITY_GOOGLE_VIEWER_SUBJECTS` | at least one of the two lists | Comma-separated Google `sub` values granted read access. May be empty for a reviewer-only deployment. |
+| `APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS` | at least one of the two lists | Comma-separated Google `sub` values granted read + verify/delete/content access. May be empty for a viewer-only deployment. |
 | `APP_SECURITY_ALLOWED_ORIGINS` | no | Comma-separated exact browser origins allowed for CORS (empty = same-origin only). |
 | `APP_SECURITY_POST_LOGIN_REDIRECT` | no | Absolute path to redirect to after login (default `/`). |
 | `APP_SECURITY_MODE` | no | `google` (default) or `stack-test`. |
 
-Register the redirect URI `http://localhost:18080/login/oauth2/code/google` in
-the Google Cloud OAuth client. The Google `sub` claim is the stable identifier
-used for the allowlists (an account's `sub` never changes).
+Register the redirect URI `http://localhost:18080/api/v1/login/oauth2/code/google`
+in the Google Cloud OAuth client (the backend serves the OAuth2 callback under its
+`/api/v1` servlet context path). In production the redirect URI is
+`https://<public-host>/api/v1/login/oauth2/code/google`. The Google `sub` claim is
+the stable identifier used for the allowlists (an account's `sub` never changes).
+
+Startup validation is fail-closed: in the default `google` mode the app refuses to
+start unless the client credentials and subject lists are present, non-empty (at
+least one list), and not left as the `your-...` placeholders from `.env.example`.
 
 Roles:
 

@@ -209,6 +209,47 @@ class DocumentContentServiceTest {
 		assertEquals(503, e.getCode().httpStatus());
 	}
 
+	// The source InputStream is closed on a successful stream.
+	@Test
+	void sourceStreamIsClosedOnSuccess() {
+		CloseTrackingInputStream source = new CloseTrackingInputStream(PDF_BYTES);
+		MinioObjectStorage stub = new MinioObjectStorage(null, null) {
+			@Override
+			public java.io.InputStream get(String objectKey) {
+				return source;
+			}
+		};
+		DocumentContentService service = new DocumentContentService(this.posRecordRepository,
+				this.posDocumentRepository, stub);
+		ContentDescriptor descriptor = new ContentDescriptor("so-x", "archives/x/y.pdf", "application/pdf",
+				"document.pdf", PDF_BYTES.length);
+
+		service.streamContent(descriptor, new ByteArrayOutputStream());
+
+		assertTrue(source.closed, "source stream must be closed after a successful stream");
+	}
+
+	// The source InputStream is closed when a simulated read/copy failure occurs.
+	@Test
+	void sourceStreamIsClosedOnReadFailure() {
+		FailingInputStream source = new FailingInputStream();
+		MinioObjectStorage stub = new MinioObjectStorage(null, null) {
+			@Override
+			public java.io.InputStream get(String objectKey) {
+				return source;
+			}
+		};
+		DocumentContentService service = new DocumentContentService(this.posRecordRepository,
+				this.posDocumentRepository, stub);
+		ContentDescriptor descriptor = new ContentDescriptor("so-x", "archives/x/y.pdf", "application/pdf",
+				"document.pdf", PDF_BYTES.length);
+
+		assertThrows(DocumentContentException.class,
+				() -> service.streamContent(descriptor, new ByteArrayOutputStream()));
+
+		assertTrue(source.closed, "source stream must be closed after a read/copy failure");
+	}
+
 	// 8. Errors contain no object key, bucket, or credentials.
 	@Test
 	void errorsExposeNoObjectKeyBucketOrCredentials() {
@@ -274,6 +315,41 @@ class DocumentContentServiceTest {
 	/** Small holder so this test does not depend on the review package fixtures. */
 	private static final class ReviewSha {
 		static final String SHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+	}
+
+	/** A {@link ByteArrayInputStream} that records whether it was closed. */
+	private static final class CloseTrackingInputStream extends java.io.ByteArrayInputStream {
+		boolean closed;
+
+		CloseTrackingInputStream(byte[] buf) {
+			super(buf);
+		}
+
+		@Override
+		public void close() throws java.io.IOException {
+			this.closed = true;
+			super.close();
+		}
+	}
+
+	/** An {@link java.io.InputStream} whose reads always fail, recording closure. */
+	private static final class FailingInputStream extends java.io.InputStream {
+		boolean closed;
+
+		@Override
+		public int read() throws java.io.IOException {
+			throw new java.io.IOException("simulated read failure");
+		}
+
+		@Override
+		public int read(byte[] b, int off, int len) throws java.io.IOException {
+			throw new java.io.IOException("simulated read failure");
+		}
+
+		@Override
+		public void close() throws java.io.IOException {
+			this.closed = true;
+		}
 	}
 
 }

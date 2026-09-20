@@ -106,6 +106,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 UPLOAD_RESPONSE_FILE=""
+CONTENT_DIR=""
 
 cleanup() {
     docker compose --env-file "${ENV_FILE}" -p "${PROJECT_NAME}" -f compose.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -116,6 +117,10 @@ cleanup() {
     if [ -n "${UPLOAD_RESPONSE_FILE}" ]; then
         rm -f "${UPLOAD_RESPONSE_FILE}"
         UPLOAD_RESPONSE_FILE=""
+    fi
+    if [ -n "${CONTENT_DIR}" ]; then
+        rm -rf "${CONTENT_DIR}"
+        CONTENT_DIR=""
     fi
 }
 trap cleanup EXIT INT TERM
@@ -212,6 +217,22 @@ http_get_retry() {
     done
     echo "ERROR: ${_gr_label}: expected http ${_gr_expect}, last was ${HTTP_CODE}: ${HTTP_BODY}" >&2
     return 1
+}
+
+# --- helper: authenticated binary download capturing headers + status --------
+# http_download URL FILE
+# Downloads URL (with the stack-test bearer token) to FILE, capturing the
+# response headers into FILE.headers and the HTTP status into HTTP_CODE.
+http_download() {
+    _hd_url="$1"
+    _hd_file="$2"
+    _hd_code_file="$(mktemp pos-doc-task2-test-code.XXXXXX)"
+    curl --silent --max-time 30 --output "${_hd_file}" --write-out '%{http_code}' \
+        --dump-header "${_hd_file}.headers" \
+        --header "${AUTH_HEADER}" \
+        "${_hd_url}" > "${_hd_code_file}" 2>/dev/null || true
+    HTTP_CODE="$(tr -d '[:space:]' < "${_hd_code_file}" 2>/dev/null || true)"
+    rm -f "${_hd_code_file}"
 }
 
 # --- 1: validate compose configuration ---------------------------------------
@@ -913,6 +934,78 @@ V2="$(json_int version)"
 [ "${V2}" = "$((V1 + 1))" ] || { echo "ERROR: verification did not bump version (${V1} -> ${V2})" >&2; exit 1; }
 echo "verify: status COMPLETED, version ${V1} -> ${V2}"
 
+# --- Task 11: protected content access while the record is active ------------
+# The record is COMPLETED and active; the authenticated (stack-test bearer) HTTP
+# content endpoints must stream the exact fixture bytes with the required
+# security/content headers. The content URLs are saved for the post-delete check.
+
+echo "== content: uploadedBy is the synthetic stack-test principal =="
+http_get_retry "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}" 200 "content detail"
+printf '%s' "${HTTP_BODY}" | grep -q '"uploadedBy":"stack-test:principal"' || { echo "ERROR: uploadedBy is not stack-test:principal: ${HTTP_BODY}" >&2; exit 1; }
+echo "content: uploadedBy == stack-test:principal"
+
+echo "== content: extract both document ids from the document list =="
+DOCS_LIST="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
+# Parse the JSON to extract only the top-level document ids (the nested
+# storageObject also has an id, so a naive grep would capture the wrong ids).
+DOC_IDS="$(printf '%s' "${DOCS_LIST}" | python3 -c 'import json,sys; [print(d["id"]) for d in json.load(sys.stdin)]')"
+DOC1="$(printf '%s' "${DOC_IDS}" | sed -n '1p')"
+DOC2="$(printf '%s' "${DOC_IDS}" | sed -n '2p')"
+[ -n "${DOC1}" ] && [ -n "${DOC2}" ] && [ "${DOC1}" != "${DOC2}" ] || { echo "ERROR: could not extract two distinct document ids: ${DOCS_LIST}" >&2; exit 1; }
+echo "content: two document ids captured"
+
+CONTENT_DIR="$(mktemp -d "pos-doc-task11-content.XXXXXX")"
+PDF_CONTENT_URL="http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents/${DOC1}/content"
+ZIP_CONTENT_URL="http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/source-archive/content"
+
+echo "== content: download each PDF via the authenticated HTTP content endpoint =="
+for DOC_ID in "${DOC1}" "${DOC2}"; do
+    http_download "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents/${DOC_ID}/content" "${CONTENT_DIR}/${DOC_ID}.pdf"
+    [ "${HTTP_CODE}" = "200" ] || { echo "ERROR: PDF content returned http ${HTTP_CODE} for document ${DOC_ID}" >&2; exit 1; }
+    _H="${CONTENT_DIR}/${DOC_ID}.pdf.headers"
+    grep -qi '^content-type: application/pdf' "${_H}" || { echo "ERROR: PDF content-type wrong: $(grep -i '^content-type' "${_H}")" >&2; exit 1; }
+    grep -qi '^content-disposition: inline' "${_H}" || { echo "ERROR: PDF must be served inline: $(grep -i '^content-disposition' "${_H}")" >&2; exit 1; }
+    grep -qi '^cache-control: no-store' "${_H}" || { echo "ERROR: PDF cache-control wrong: $(grep -i '^cache-control' "${_H}")" >&2; exit 1; }
+    grep -qi '^pragma: no-cache' "${_H}" || { echo "ERROR: PDF pragma wrong: $(grep -i '^pragma' "${_H}")" >&2; exit 1; }
+    grep -qi '^x-content-type-options: nosniff' "${_H}" || { echo "ERROR: PDF missing nosniff" >&2; exit 1; }
+    _SIZE="$(wc -c < "${CONTENT_DIR}/${DOC_ID}.pdf" | tr -d '[:space:]')"
+    _CL="$(grep -i '^content-length:' "${_H}" | head -1 | sed 's/.*: *//' | tr -d '\r')"
+    [ "${_CL}" = "${_SIZE}" ] || { echo "ERROR: PDF content-length ${_CL} != body size ${_SIZE}" >&2; exit 1; }
+done
+echo "content: both PDFs downloaded with correct headers and content-length"
+
+echo "== content: downloaded PDFs are byte-for-byte the fixture PDFs =="
+MATCH=0
+for DOC_ID in "${DOC1}" "${DOC2}"; do
+    ACTUAL_HASH="$(sha256sum "${CONTENT_DIR}/${DOC_ID}.pdf" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+    for ENTRY in documents/first.pdf documents/second.pdf; do
+        EXPECTED_HASH="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" "${ENTRY}" 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+        if [ "${ACTUAL_HASH}" = "${EXPECTED_HASH}" ]; then
+            MATCH=$((MATCH + 1))
+            break
+        fi
+    done
+done
+[ "${MATCH}" = "2" ] || { echo "ERROR: downloaded PDFs did not match fixture entries (matched ${MATCH}/2)." >&2; exit 1; }
+echo "content: both downloaded PDFs byte-for-byte equal fixture PDFs"
+
+echo "== content: download the source ZIP via the authenticated HTTP endpoint =="
+http_download "${ZIP_CONTENT_URL}" "${CONTENT_DIR}/source.zip"
+[ "${HTTP_CODE}" = "200" ] || { echo "ERROR: ZIP content returned http ${HTTP_CODE}" >&2; exit 1; }
+_H="${CONTENT_DIR}/source.zip.headers"
+grep -qi '^content-type: application/zip' "${_H}" || { echo "ERROR: ZIP content-type wrong: $(grep -i '^content-type' "${_H}")" >&2; exit 1; }
+grep -qi '^content-disposition: attachment' "${_H}" || { echo "ERROR: ZIP must be served as attachment: $(grep -i '^content-disposition' "${_H}")" >&2; exit 1; }
+grep -qi '^cache-control: no-store' "${_H}" || { echo "ERROR: ZIP cache-control wrong" >&2; exit 1; }
+grep -qi '^pragma: no-cache' "${_H}" || { echo "ERROR: ZIP pragma wrong" >&2; exit 1; }
+grep -qi '^x-content-type-options: nosniff' "${_H}" || { echo "ERROR: ZIP missing nosniff" >&2; exit 1; }
+_ZIP_SIZE="$(wc -c < "${CONTENT_DIR}/source.zip" | tr -d '[:space:]')"
+_ZIP_CL="$(grep -i '^content-length:' "${_H}" | head -1 | sed 's/.*: *//' | tr -d '\r')"
+[ "${_ZIP_CL}" = "${_ZIP_SIZE}" ] || { echo "ERROR: ZIP content-length ${_ZIP_CL} != body size ${_ZIP_SIZE}" >&2; exit 1; }
+ZIP_HASH="$(sha256sum "${CONTENT_DIR}/source.zip" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+FIXTURE_HASH="$(sha256sum "${FIXTURE}" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+[ "${ZIP_HASH}" = "${FIXTURE_HASH}" ] || { echo "ERROR: downloaded ZIP is not byte-for-byte identical to the uploaded ZIP." >&2; exit 1; }
+echo "content: downloaded ZIP byte-for-byte identical to the uploaded ZIP"
+
 echo "== Task 10 smoke: soft delete returns 204 =="
 http_call DELETE "http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}"
 if [ "${HTTP_CODE}" != "204" ]; then
@@ -934,6 +1027,24 @@ if printf '%s' "${HTTP_BODY}" | grep -q "\"id\":\"${POS_RECORD_ID}\""; then
     exit 1
 fi
 echo "post-delete: hidden from detail and search"
+
+# --- Task 11: protected content is gone after soft delete ---------------------
+echo "== content: after soft delete, document content is a sanitized 404 =="
+http_call GET "${PDF_CONTENT_URL}"
+[ "${HTTP_CODE}" = "404" ] || { echo "ERROR: deleted document content returned http ${HTTP_CODE}, expected 404: ${HTTP_BODY}" >&2; exit 1; }
+printf '%s' "${HTTP_BODY}" | grep -q "DOCUMENT_NOT_FOUND" || { echo "ERROR: deleted document 404 missing DOCUMENT_NOT_FOUND: ${HTTP_BODY}" >&2; exit 1; }
+echo "content: deleted document -> 404 DOCUMENT_NOT_FOUND"
+
+echo "== content: after soft delete, source archive content is a sanitized 404 =="
+http_call GET "${ZIP_CONTENT_URL}"
+[ "${HTTP_CODE}" = "404" ] || { echo "ERROR: deleted source archive returned http ${HTTP_CODE}, expected 404: ${HTTP_BODY}" >&2; exit 1; }
+printf '%s' "${HTTP_BODY}" | grep -q "POS_RECORD_NOT_FOUND" || { echo "ERROR: deleted source 404 missing POS_RECORD_NOT_FOUND: ${HTTP_BODY}" >&2; exit 1; }
+echo "content: deleted source archive -> 404 POS_RECORD_NOT_FOUND"
+
+if [ -n "${CONTENT_DIR}" ]; then
+    rm -rf "${CONTENT_DIR}"
+    CONTENT_DIR=""
+fi
 
 echo ""
 echo "verify-container-stack: ALL CHECKS PASSED"

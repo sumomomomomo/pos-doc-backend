@@ -78,13 +78,16 @@ services:
       # consumer for its first phase and re-enables it for the second.
       INGESTION_CONSUMER_ENABLED: ${INGESTION_CONSUMER_ENABLED:-true}
       # --- Security (Google OIDC) ---
-      # Fail-closed: in the default "google" mode the client credentials and the
-      # subject allowlists must be provided. See SecurityStartupValidator.
+      # Fail-closed: in the default "google" mode the client credentials are
+      # required. See SecurityStartupValidator.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?GOOGLE_CLIENT_SECRET is required}
       APP_SECURITY_MODE: ${APP_SECURITY_MODE:-google}
-      APP_SECURITY_GOOGLE_VIEWER_SUBJECTS: ${APP_SECURITY_GOOGLE_VIEWER_SUBJECTS:?APP_SECURITY_GOOGLE_VIEWER_SUBJECTS is required}
-      APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS: ${APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS:?APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS is required}
+      # Each subject list is optional (may be an empty string) so a reviewer-only
+      # deployment can leave the viewer list empty. SecurityProperties enforces
+      # that the two lists are not BOTH empty (at least one allowed subject).
+      APP_SECURITY_GOOGLE_VIEWER_SUBJECTS: ${APP_SECURITY_GOOGLE_VIEWER_SUBJECTS:-}
+      APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS: ${APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS:-}
       APP_SECURITY_ALLOWED_ORIGINS: ${APP_SECURITY_ALLOWED_ORIGINS:-}
       APP_SECURITY_POST_LOGIN_REDIRECT: ${APP_SECURITY_POST_LOGIN_REDIRECT:-/}
       APP_SECURITY_STACK_TEST_TOKEN: ${APP_SECURITY_STACK_TEST_TOKEN:-}

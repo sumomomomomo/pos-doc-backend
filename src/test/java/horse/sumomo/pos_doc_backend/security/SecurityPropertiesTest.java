@@ -48,6 +48,36 @@ class SecurityPropertiesTest {
 				() -> new SecurityProperties("google", google(List.of("a"), List.of("a")), List.of(), "/", ""));
 	}
 
+	// The your- prefixed placeholder subjects tracked as examples are rejected (a
+	// Google sub is a stable numeric id, never your-...).
+	@Test
+	void yourPrefixedSubjectPlaceholderRejected() {
+		assertThrows(IllegalArgumentException.class,
+				() -> new SecurityProperties("google",
+						google(List.of("your-viewer-subject-id"), List.of("sub-reviewer")), List.of(), "/", ""));
+		assertThrows(IllegalArgumentException.class,
+				() -> new SecurityProperties("google",
+						google(List.of("sub-viewer"), List.of("your-reviewer-subject-id")), List.of(), "/", ""));
+	}
+
+	// A reviewer-only deployment (empty viewer list) is accepted; only BOTH empty
+	// is rejected.
+	@Test
+	void reviewerOnlyDeploymentAccepted() {
+		SecurityProperties p = new SecurityProperties("google", google(List.of(), List.of("sub-reviewer")),
+				List.of(), "/", "");
+		assertTrue(p.reviewerSubjects().contains("sub-reviewer"));
+		assertTrue(p.viewerSubjects().isEmpty());
+	}
+
+	@Test
+	void viewerOnlyDeploymentAccepted() {
+		SecurityProperties p = new SecurityProperties("google", google(List.of("sub-viewer"), List.of()),
+				List.of(), "/", "");
+		assertTrue(p.viewerSubjects().contains("sub-viewer"));
+		assertTrue(p.reviewerSubjects().isEmpty());
+	}
+
 	// 5. Absolute/protocol-relative login redirects are rejected.
 	@Test
 	void absoluteRedirectRejected() {

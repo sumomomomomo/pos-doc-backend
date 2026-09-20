@@ -91,6 +91,12 @@ public final class SecurityProperties {
 			if (trimmed.isEmpty()) {
 				continue;
 			}
+			// A Google `sub` is a stable numeric id, so a `your-...` value is always a
+			// placeholder (as in .env.example) and must fail closed, not be honored.
+			if (trimmed.toLowerCase(Locale.ROOT).startsWith("your-")) {
+				throw new IllegalArgumentException(
+						"security allowlist subject is a placeholder, not a real Google subject");
+			}
 			if (!seen.add(trimmed)) {
 				throw new IllegalArgumentException("duplicate subject in the security allowlist");
 			}

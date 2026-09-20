@@ -25,7 +25,6 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import jakarta.servlet.Filter;
-import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -47,8 +46,6 @@ import jakarta.servlet.http.HttpServletResponse;
 @ConditionalOnProperty(name = "app.security.mode", havingValue = "google", matchIfMissing = true)
 public class GoogleSecurityConfiguration {
 
-	private static final String CSRF_COOKIE_NAME = "XSRF-TOKEN";
-
 	@Bean
 	public OidcSubjectAuthorizer oidcSubjectAuthorizer(SecurityProperties properties) {
 		return new OidcSubjectAuthorizer(properties.viewerSubjects(), properties.reviewerSubjects(),
@@ -64,6 +61,13 @@ public class GoogleSecurityConfiguration {
 		http
 			.cors(cors -> cors.configurationSource(corsConfigurationSource(properties)))
 			.csrf(csrf -> csrf
+				// The supported Spring Security SPA flow: cookie-based repository plus a
+				// request handler that resolves the exact cookie value from the
+				// X-XSRF-TOKEN header (and keeps the BREACH-masking XOR path for
+				// form-parameter submissions). The repository is the explicitly
+				// configured bean (XSRF-TOKEN cookie, / path, Secure, SameSite=Lax,
+				// HttpOnly=false).
+				.spa()
 				.csrfTokenRepository(csrfTokenRepository)
 				.requireCsrfProtectionMatcher(allButSearchPost()))
 			.oauth2Login(oauth2 -> oauth2
@@ -71,12 +75,10 @@ public class GoogleSecurityConfiguration {
 				.defaultSuccessUrl(properties.postLoginRedirect(), true))
 			.logout(logout -> logout
 				.logoutRequestMatcher(isPost("/auth/logout"))
+				// The CsrfLogoutHandler added by the CSRF configurer clears the
+				// XSRF-TOKEN cookie through the same repository; the session is
+				// invalidated by the default logout handler chain.
 				.logoutSuccessHandler((request, response, authentication) -> {
-					Cookie csrfCookie = new Cookie(CSRF_COOKIE_NAME, "");
-					csrfCookie.setPath("/");
-					csrfCookie.setMaxAge(0);
-					csrfCookie.setHttpOnly(true);
-					response.addCookie(csrfCookie);
 					response.setStatus(HttpServletResponse.SC_NO_CONTENT);
 				}))
 			.exceptionHandling(ex -> ex

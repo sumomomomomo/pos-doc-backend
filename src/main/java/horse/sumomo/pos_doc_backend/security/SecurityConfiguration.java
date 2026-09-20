@@ -4,6 +4,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.springframework.http.ResponseCookie;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 
 /**
@@ -24,14 +25,28 @@ public class SecurityConfiguration {
 	}
 
 	/**
-	 * Shared cookie-based CSRF token repository. It is a top-level bean (not only a
-	 * filter-chain-local object) so the {@code AuthenticationController} can
-	 * materialize the current token and publish the {@code XSRF-TOKEN} cookie on
-	 * {@code GET /auth/me}.
+	 * Shared cookie-based CSRF token repository for the production (Google) chain.
+	 *
+	 * <p>Explicitly configured for the browser SPA contract: the cookie is named
+	 * {@code XSRF-TOKEN}, the token is submitted in the {@code X-XSRF-TOKEN} header,
+	 * the cookie is JavaScript-readable (HttpOnly=false) while the session cookie
+	 * remains HttpOnly, the cookie path is {@code /}, the cookie is always Secure
+	 * (production runs behind the HTTPS reverse proxy), and {@code SameSite=Lax}
+	 * matches the session cookie. The raw token is stored in the cookie; the SPA
+	 * request handler of the filter chain resolves the exact cookie value from the
+	 * header.
 	 */
 	@Bean
 	public CookieCsrfTokenRepository cookieCsrfTokenRepository() {
-		return CookieCsrfTokenRepository.withHttpOnlyFalse();
+		CookieCsrfTokenRepository repository = new CookieCsrfTokenRepository();
+		repository.setCookieName("XSRF-TOKEN");
+		repository.setHeaderName("X-XSRF-TOKEN");
+		repository.setCookiePath("/");
+		repository.setCookieCustomizer((ResponseCookie.ResponseCookieBuilder builder) -> builder
+				.httpOnly(false)
+				.secure(true)
+				.sameSite("Lax"));
+		return repository;
 	}
 
 }

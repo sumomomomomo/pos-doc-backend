@@ -1,5 +1,7 @@
 package horse.sumomo.pos_doc_backend.security;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
@@ -36,6 +38,7 @@ import horse.sumomo.pos_doc_backend.review.PosRecordCommandService;
 import horse.sumomo.pos_doc_backend.review.PosRecordReadService;
 import horse.sumomo.pos_doc_backend.review.PosRecordSearchService;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -44,6 +47,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -125,6 +129,21 @@ class GoogleSecurityFilterChainTest {
 					assertTrue(redirect != null
 							&& (redirect.contains("accounts.google.com") || redirect.contains("oauth2/authorize")),
 							"must redirect to Google's authorization endpoint: " + redirect);
+				});
+	}
+
+	// 2b. With the real servlet context path (/api/v1) the generated Google
+	//     redirect_uri must be the callback under that context path, because the
+	//     OAuth2 callback endpoint is served at /api/v1/login/oauth2/code/google.
+	@Test
+	void googleCallbackUriIncludesTheConfiguredContextPath() throws Exception {
+		this.mockMvc.perform(get("/api/v1/oauth2/authorization/google").contextPath("/api/v1"))
+				.andExpect(status().is3xxRedirection())
+				.andExpect(result -> {
+					String redirect = result.getResponse().getRedirectedUrl();
+					String decoded = URLDecoder.decode(redirect, StandardCharsets.UTF_8);
+					assertTrue(decoded.contains("/api/v1/login/oauth2/code/google"),
+							"redirect_uri must include the /api/v1 context path: " + decoded);
 				});
 	}
 
@@ -310,7 +329,10 @@ class GoogleSecurityFilterChainTest {
 				.andExpect(status().isUnauthorized());
 	}
 
-	// 9. /auth/me returns only email, display name, and roles; no-store; materializes XSRF-TOKEN.
+	// 9. /auth/me returns only email, display name, and roles and sets no-store.
+	//    (The XSRF-TOKEN cookie emission and its exact production attributes are
+	//    proven in SpaCsrfRoundTripTest, because .with(csrf()) in this shared
+	//    context rewrites the CsrfFilter repository and would suppress the cookie.)
 	@Test
 	void currentUserExposesOnlyTheAgreedFieldsAndNoStoreAndCsrfCookie() throws Exception {
 		this.mockMvc.perform(get("/auth/me").with(OidcTestAuth.oidc(VIEWER, false)))
@@ -319,7 +341,6 @@ class GoogleSecurityFilterChainTest {
 				.andExpect(jsonPath("$.displayName").isNotEmpty())
 				.andExpect(jsonPath("$.roles").isArray())
 				.andExpect(header().string("Cache-Control", "no-store"))
-				.andExpect(cookie().exists("XSRF-TOKEN"))
 				.andExpect(result -> {
 					String body = result.getResponse().getContentAsString();
 					assertTrue(!body.contains("sub-") && !body.contains("sub\""), "body must not leak the subject: " + body);
@@ -359,6 +380,69 @@ class GoogleSecurityFilterChainTest {
 				});
 	}
 
+	// 13. With no allowed origins configured (the default), a preflight from any
+	//     origin receives no CORS permission headers.
+	@Test
+	void emptyAllowedOriginsEmitsNoCorsPermissionHeaders() throws Exception {
+		this.mockMvc.perform(options("/auth/me")
+					.header("Origin", "https://spa.example.com")
+					.header("Access-Control-Request-Method", "POST"))
+				.andExpect(result -> {
+					String acao = result.getResponse().getHeader("Access-Control-Allow-Origin");
+					assertTrue(acao == null, "no Access-Control-Allow-Origin when allowed-origins is empty, got: " + acao);
+					assertTrue(result.getResponse().getHeader("Access-Control-Allow-Credentials") == null,
+							"no Access-Control-Allow-Credentials when allowed-origins is empty");
+				});
+	}
+
+	// 14. HTTP boundary: the extracted PDF streams a non-empty body byte-for-byte
+	//     with every required security/content header (inline disposition).
+	@Test
+	void pdfContentStreamsNonEmptyBodyWithRequiredHeaders() throws Exception {
+		byte[] pdfBytes = ("%PDF-1.4\n% synthetic content\n%%EOF\n").getBytes(StandardCharsets.UTF_8);
+		mockContentStreamingBytes(pdfBytes, new byte[] {0x50, 0x4b});
+
+		this.mockMvc.perform(get("/pos-records/{posRecordId}/documents/{documentId}/content", POS_ID, DOC_ID)
+					.with(OidcTestAuth.oidc(REVIEWER, true)))
+				.andExpect(status().isOk())
+				.andExpect(header().string("Content-Type", "application/pdf"))
+				.andExpect(header().string("Content-Length", String.valueOf(pdfBytes.length)))
+				.andExpect(header().string("Cache-Control", "no-store, no-cache, must-revalidate"))
+				.andExpect(header().string("Pragma", "no-cache"))
+				.andExpect(header().string("X-Content-Type-Options", "nosniff"))
+				.andExpect(result -> {
+					String disposition = result.getResponse().getHeader("Content-Disposition");
+					assertTrue(disposition != null && disposition.startsWith("inline") && disposition.contains("first.pdf"),
+							"PDF must be inline with the safe filename, got: " + disposition);
+					assertArrayEquals(pdfBytes, result.getResponse().getContentAsByteArray(),
+							"PDF body must stream byte-for-byte");
+				});
+	}
+
+	// 15. HTTP boundary: the original ZIP streams a non-empty body byte-for-byte
+	//     with every required header (attachment disposition).
+	@Test
+	void sourceArchiveContentStreamsNonEmptyBodyWithRequiredHeaders() throws Exception {
+		byte[] zipBytes = new byte[] {0x50, 0x4b, 0x03, 0x04, 0x0a, 0x0b, 0x0c, 0x0d};
+		mockContentStreamingBytes(new byte[] {0x25, 0x50}, zipBytes);
+
+		this.mockMvc.perform(get("/pos-records/{posRecordId}/source-archive/content", POS_ID)
+					.with(OidcTestAuth.oidc(REVIEWER, true)))
+				.andExpect(status().isOk())
+				.andExpect(header().string("Content-Type", "application/zip"))
+				.andExpect(header().string("Content-Length", String.valueOf(zipBytes.length)))
+				.andExpect(header().string("Cache-Control", "no-store, no-cache, must-revalidate"))
+				.andExpect(header().string("Pragma", "no-cache"))
+				.andExpect(header().string("X-Content-Type-Options", "nosniff"))
+				.andExpect(result -> {
+					String disposition = result.getResponse().getHeader("Content-Disposition");
+					assertTrue(disposition != null && disposition.startsWith("attachment") && disposition.contains("archive.zip"),
+							"ZIP must be an attachment with the safe filename, got: " + disposition);
+					assertArrayEquals(zipBytes, result.getResponse().getContentAsByteArray(),
+							"ZIP body must stream byte-for-byte");
+				});
+	}
+
 	// ------------------------------------------------------------------
 	// helpers
 	// ------------------------------------------------------------------
@@ -373,6 +457,28 @@ class GoogleSecurityFilterChainTest {
 			out.flush();
 			return null;
 		}).when(this.contentService).streamContent(any(ContentDescriptor.class), any());
+	}
+
+	/**
+	 * Stubs the content service so the PDF descriptor carries {@code pdfBytes}
+	 * and the source-archive descriptor carries {@code zipBytes}, and
+	 * {@code streamContent} writes the matching bytes to the target stream.
+	 */
+	private void mockContentStreamingBytes(byte[] pdfBytes, byte[] zipBytes) {
+		ContentDescriptor pdf = new ContentDescriptor("so-pdf", "archives/1/2.pdf", "application/pdf",
+				"first.pdf", (long) pdfBytes.length);
+		ContentDescriptor zip = new ContentDescriptor("so-zip", "archives/1/3.zip", "application/zip",
+				"archive.zip", (long) zipBytes.length);
+		when(this.contentService.pdfDescriptor(POS_ID, DOC_ID)).thenReturn(pdf);
+		when(this.contentService.sourceArchiveDescriptor(POS_ID)).thenReturn(zip);
+		doAnswer(invocation -> {
+			ContentDescriptor descriptor = invocation.getArgument(0);
+			java.io.OutputStream out = invocation.getArgument(1);
+			byte[] bytes = "application/pdf".equals(descriptor.contentType()) ? pdfBytes : zipBytes;
+			out.write(bytes);
+			out.flush();
+			return null;
+		}).when(this.contentService).streamContent(any(ContentDescriptor.class), any(java.io.OutputStream.class));
 	}
 
 	private static MockMultipartFile zip() {

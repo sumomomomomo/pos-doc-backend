@@ -48,6 +48,24 @@ class SecurityStartupValidatorTest {
 		assertThrows(IllegalStateException.class, () -> new SecurityStartupValidator(google(), env).validate());
 	}
 
+	// The exact placeholder values tracked in .env.example must be rejected.
+	@Test
+	void googleModeFailsWithTrackedExamplePlaceholderCredentials() {
+		MockEnvironment env = new MockEnvironment();
+		env.setProperty("GOOGLE_CLIENT_ID", "your-google-oauth-client-id");
+		env.setProperty("GOOGLE_CLIENT_SECRET", "your-google-oauth-client-secret");
+		assertThrows(IllegalStateException.class, () -> new SecurityStartupValidator(google(), env).validate());
+	}
+
+	// A single your- prefixed placeholder credential fails closed even if the other is usable.
+	@Test
+	void googleModeFailsWithYourPrefixedClientId() {
+		MockEnvironment env = new MockEnvironment();
+		env.setProperty("GOOGLE_CLIENT_ID", "your-google-oauth-client-id");
+		env.setProperty("GOOGLE_CLIENT_SECRET", "a-usable-secret");
+		assertThrows(IllegalStateException.class, () -> new SecurityStartupValidator(google(), env).validate());
+	}
+
 	@Test
 	void googleModePassesWithUsableCredentials() {
 		MockEnvironment env = new MockEnvironment();

@@ -2,8 +2,6 @@ package horse.sumomo.pos_doc_backend.security;
 
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
-import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.DeferredCsrfToken;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -16,7 +14,6 @@ import com.yourcompany.pos.api.AuthenticationApi;
 import com.yourcompany.pos.api.model.CurrentUser;
 
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * Implements the generated {@link AuthenticationApi} contract.
@@ -32,12 +29,9 @@ import jakarta.servlet.http.HttpServletResponse;
 public class AuthenticationController implements AuthenticationApi {
 
 	private final CurrentUserService currentUserService;
-	private final CookieCsrfTokenRepository csrfTokenRepository;
 
-	public AuthenticationController(CurrentUserService currentUserService,
-			CookieCsrfTokenRepository csrfTokenRepository) {
+	public AuthenticationController(CurrentUserService currentUserService) {
 		this.currentUserService = currentUserService;
-		this.csrfTokenRepository = csrfTokenRepository;
 	}
 
 	@Override
@@ -57,10 +51,14 @@ public class AuthenticationController implements AuthenticationApi {
 	}
 
 	/**
-	 * Forces the deferred CSRF token to be generated and saved to the response so the
-	 * {@code XSRF-TOKEN} cookie is written (the established Spring Security SPA
-	 * pattern). Without a CSRF token in the security context (for example in the
-	 * isolated stack-test chain) this is a no-op.
+	 * Materializes the deferred CSRF token so the {@code XSRF-TOKEN} cookie is
+	 * written on the response. This uses the supported SPA mechanism: the
+	 * {@link DeferredCsrfToken} published by the {@code CsrfFilter} is resolved,
+	 * and the framework itself persists the <em>raw</em> token through the
+	 * configured {@code CsrfTokenRepository} (no manual {@code saveToken} call, so
+	 * a masked/XOR-wrapped value can never be persisted). Without a CSRF token in
+	 * the security context (for example in the isolated stack-test chain) this is
+	 * a no-op.
 	 */
 	private void materializeCsrfToken() {
 		RequestAttributes attributes = RequestContextHolder.getRequestAttributes();
@@ -68,17 +66,9 @@ public class AuthenticationController implements AuthenticationApi {
 			return;
 		}
 		HttpServletRequest request = servletAttributes.getRequest();
-		HttpServletResponse response = servletAttributes.getResponse();
-		Object token = request.getAttribute(CsrfToken.class.getName());
-		CsrfToken csrfToken = null;
-		if (token instanceof DeferredCsrfToken deferred) {
-			csrfToken = deferred.get();
-		}
-		else if (token instanceof CsrfToken existing) {
-			csrfToken = existing;
-		}
-		if (csrfToken != null && response != null) {
-			this.csrfTokenRepository.saveToken(csrfToken, request, response);
+		Object deferred = request.getAttribute(DeferredCsrfToken.class.getName());
+		if (deferred instanceof DeferredCsrfToken deferredToken) {
+			deferredToken.get();
 		}
 	}
 

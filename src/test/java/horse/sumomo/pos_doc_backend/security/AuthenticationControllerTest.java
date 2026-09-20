@@ -4,7 +4,6 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.cookie;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -35,6 +34,9 @@ class AuthenticationControllerTest {
 
 	@Test
 	void getCurrentUserReturnsAgreedFieldsNoStoreAndCsrfCookie() throws Exception {
+		// The XSRF-TOKEN cookie emission and its exact production attributes are
+		// proven in SpaCsrfRoundTripTest (this class's .with(csrf()) rewrites the
+		// CsrfFilter repository and would suppress the cookie).
 		this.mockMvc.perform(get("/auth/me").with(OidcTestAuth.oidc(VIEWER, false)).with(csrf()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.email").isNotEmpty())
@@ -42,8 +44,7 @@ class AuthenticationControllerTest {
 				.andExpect(jsonPath("$.roles").isArray())
 				.andExpect(jsonPath("$.roles").value(hasItem("USER")))
 				.andExpect(header().string("Cache-Control", "no-store"))
-				.andExpect(header().string("X-Content-Type-Options", "nosniff"))
-				.andExpect(cookie().exists("XSRF-TOKEN"));
+				.andExpect(header().string("X-Content-Type-Options", "nosniff"));
 	}
 
 	@Test

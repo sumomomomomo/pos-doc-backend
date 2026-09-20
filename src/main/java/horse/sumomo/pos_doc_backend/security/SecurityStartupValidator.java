@@ -1,5 +1,7 @@
 package horse.sumomo.pos_doc_backend.security;
 
+import java.util.Locale;
+
 import org.springframework.core.env.Environment;
 
 /**
@@ -50,8 +52,11 @@ public final class SecurityStartupValidator {
 		if (value == null || value.isBlank()) {
 			return false;
 		}
-		String lower = value.toLowerCase();
-		return !lower.contains("change-me") && !lower.contains("placeholder") && !lower.contains("unset")
+		String lower = value.trim().toLowerCase(Locale.ROOT);
+		// Deterministically reject obvious placeholder forms, including the exact
+		// example values tracked in .env.example (your-google-oauth-client-id / -secret).
+		return !lower.startsWith("your-")
+				&& !lower.contains("change-me") && !lower.contains("placeholder") && !lower.contains("unset")
 				&& !lower.equals("your-client-id") && !lower.equals("your-client-secret")
 				&& !lower.equals("example") && !lower.contains("xxxx");
 	}
