@@ -1,0 +1,31 @@
+# Production deployment override for compose.yaml.
+#
+# Apply it ON TOP of the base file:
+#   docker compose -f compose.yaml -f compose.production.yaml --env-file .env up --build
+#
+# The base compose.yaml publishes NO host ports (production-safe), so this override
+# only re-adds the single port the reverse proxy needs: the backend, bound to the
+# Nginx host interface (192.168.1.35) rather than every host interface (0.0.0.0).
+#
+# Production network boundary (enforced here + by the host firewall):
+#   * backend 18080 is reachable only on 192.168.1.35 (the Nginx / reverse-proxy
+#     host) and trusted administration hosts — never on 0.0.0.0. The backend trusts
+#     X-Forwarded-* headers, so untrusted clients must not be able to reach it
+#     directly and forge those headers.
+#   * MinIO (9000/9001) and RabbitMQ (5672/15672) are NOT published to the LAN; they
+#     are reachable only on the compose internal network (the backend uses
+#     http://minio:9000 and rabbitmq:5672 internally).
+#   * stack-test authentication is never enabled in production: the mode is pinned to
+#     google with no stack-test token, regardless of the production .env.
+#   * The OCR service (192.168.1.34:8080) must NOT be exposed through Nginx. That is
+#     an internal backend-to-backend dependency, not a public route, and is enforced
+#     by the Nginx configuration in the frontend repository.
+services:
+  backend:
+    ports:
+      - "192.168.1.35:18080:18080"
+    environment:
+      # Pin production to google mode with no stack-test credential. These overrides
+      # take precedence over the base file and over the production .env.
+      APP_SECURITY_MODE: google
+      APP_SECURITY_STACK_TEST_TOKEN: ""

@@ -87,7 +87,7 @@ app:
       viewer-subjects: ${APP_SECURITY_GOOGLE_VIEWER_SUBJECTS:}
       reviewer-subjects: ${APP_SECURITY_GOOGLE_REVIEWER_SUBJECTS:}
     allowed-origins: ${APP_SECURITY_ALLOWED_ORIGINS:}
-    post-login-redirect: ${APP_SECURITY_POST_LOGIN_REDIRECT:/}
+    post-login-redirect: ${APP_SECURITY_POST_LOGIN_REDIRECT:/pos/}
     stack-test-token: ${APP_SECURITY_STACK_TEST_TOKEN:}
   rendering:
     first-page:
