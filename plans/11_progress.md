@@ -186,8 +186,11 @@ Review round 2 (this commit, on top of `423ee12`):
       logic verified to reject two identical copies and accept a distinct pair.
 - [x] `./mvnw -B -ntp clean verify` (run 1) — **627 tests, 0 failures, 0 errors, BUILD SUCCESS**.
 - [x] `docker compose --env-file .env.example config --quiet` — COMPOSE OK.
-- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (incl. the new
-      one-to-one PDF comparison and the protected-content / session-cookie behavior).
+- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (stack-test mode,
+      bearer-token auth; incl. the new one-to-one PDF comparison and the protected
+      HTTP content checks). The renamed session-cookie / logout behavior is proven by
+      `LogoutSessionCookieEmbeddedServerTest`, not by this script, which uses a bearer
+      token and never touches `POSDOCSESSION` / `XSRF-TOKEN` / `/auth/logout`.
 - [x] `./mvnw -B -ntp clean verify` (run 2) — **627 tests, 0 failures, 0 errors, BUILD SUCCESS**.
 
 Status: all corrective and review-round-2 verifications green. Committed on top of

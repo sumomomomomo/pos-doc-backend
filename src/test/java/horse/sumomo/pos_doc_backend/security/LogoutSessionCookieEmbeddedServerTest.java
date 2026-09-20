@@ -106,12 +106,22 @@ class LogoutSessionCookieEmbeddedServerTest {
 		ResponseEntity<String> out = http(HttpMethod.POST, "/api/v1/auth/logout", new HttpEntity<>(outHeaders));
 		assertEquals(HttpStatus.NO_CONTENT, out.getStatusCode(), "logout must return 204");
 
-		// 4. The real container + explicit cleanup expired the renamed session cookie.
+		// 4. The real container + explicit cleanup expired the renamed session cookie,
+		//    with the same scope (name/path/domain) as the original so the browser
+		//    deletes the same cookie.
 		SetCookie expired = findSetCookie(out.getHeaders(), "POSDOCSESSION");
 		assertNotNull(expired, "logout must expire the POSDOCSESSION cookie");
+		assertEquals("POSDOCSESSION", expired.name(), "deletion cookie must target POSDOCSESSION");
 		assertEquals("", expired.value(), "POSDOCSESSION must be cleared (empty value)");
 		assertTrue(expired.maxAge() != null && expired.maxAge() == 0,
 				"POSDOCSESSION must be expired with Max-Age=0, raw: " + raw(out.getHeaders(), "POSDOCSESSION"));
+		assertEquals("/", expired.path(), "deletion cookie must clear Path=/");
+		// The deletion cookie must match the original cookie's scope so the browser
+		// identifies the same cookie to delete.
+		assertEquals(session.path(), expired.path(),
+				"deletion cookie path must match the original session cookie path");
+		assertEquals(session.domain(), expired.domain(),
+				"deletion cookie domain must match the original session cookie domain");
 	}
 
 	private ResponseEntity<String> http(HttpMethod method, String path, HttpEntity<?> entity) {
@@ -147,19 +157,27 @@ class LogoutSessionCookieEmbeddedServerTest {
 		String[] parts = cookie.split(";", -1);
 		String nameValue = parts[0].trim();
 		int eq = nameValue.indexOf('=');
+		String name = eq >= 0 ? nameValue.substring(0, eq).trim() : nameValue;
 		String value = eq >= 0 ? nameValue.substring(eq + 1).trim() : "";
 		Integer maxAge = null;
+		String path = null;
+		String domain = null;
 		for (String attribute : parts) {
 			String trimmed = attribute.trim();
-			if (trimmed.toLowerCase(java.util.Locale.ROOT).startsWith("max-age=")) {
+			String lower = trimmed.toLowerCase(java.util.Locale.ROOT);
+			if (lower.startsWith("max-age=")) {
 				maxAge = Integer.parseInt(trimmed.substring("max-age=".length()).trim());
+			} else if (lower.startsWith("path=")) {
+				path = trimmed.substring("path=".length()).trim();
+			} else if (lower.startsWith("domain=")) {
+				domain = trimmed.substring("domain=".length()).trim();
 			}
 		}
-		return new SetCookie(value, maxAge);
+		return new SetCookie(name, value, maxAge, path, domain);
 	}
 
-	/** A parsed {@code Set-Cookie} value: the cookie value and its {@code Max-Age}. */
-	private record SetCookie(String value, Integer maxAge) {
+	/** A parsed {@code Set-Cookie} value: name, value, {@code Max-Age}, {@code Path}, and {@code Domain}. */
+	private record SetCookie(String name, String value, Integer maxAge, String path, String domain) {
 	}
 
 	/**
