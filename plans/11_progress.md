@@ -6,7 +6,56 @@ Baseline before changes: 513 tests green (`./mvnw clean verify`), HEAD `48fb9a8`
 
 Task 11 was first implemented and committed as `30ee2b8` (44 files), then found
 **not complete** against a corrective review. This file records both the original
-pass and the corrective pass.
+pass and the corrective pass. A second review of `423ee12` raised four further
+findings, fixed here.
+
+## Review round 2 — fixes to `423ee12`
+
+A second review found four issues at `423ee12`. All are fixed and verified below.
+
+### 1. (High) Protected-content authorization aligned with Spring MVC path matching
+- `GoogleSecurityConfiguration` no longer classifies protected content with a raw
+  `getRequestURI()` regex. It now uses Spring Security 7's
+  `PathPatternRequestMatcher` (GET, `/pos-records/{posRecordId}/documents/{documentId}/content`
+  and `/pos-records/{posRecordId}/source-archive/content`), which matches relative to
+  the servlet context path and, like Spring MVC's own `PathPattern` routing, ignores
+  matrix (semicolon) variables. The `AuthorizationManager` is now request-aware
+  (`decide(request, authentication)`).
+- New `ProtectedContentAuthorizationTest` proves the decision directly: a USER is
+  denied and a REVIEWER is allowed for **both** content URLs carrying `;x=1` (and the
+  plain paths, as a control). The decision is tested at the unit level because the
+  container rejects a `;x=1` request at path-matching (400, then a denied `/error`
+  dispatch) before it reaches the controller — verified on a real embedded server —
+  so the unit test is the precise way to prove the authorization stays aligned with
+  Spring's `PathPattern` behavior (a raw-URI regex would have downgraded `;x=1` to a
+  plain `ROLE_USER` read).
+
+### 2. (Medium) Removed a false progress-file claim
+- `plans/11_progress.md` claimed a stale-session CSRF test emitting
+  `CSRF_SESSION_COOKIES_MISMATCH`. No such test exists and `CsrfAccessDeniedHandler`
+  only emits `CSRF_TOKEN_INVALID` (the Task 11 contract). The false claim was
+  removed; no new error code was introduced.
+
+### 3. (Medium) Logout now proves deletion of `POSDOCSESSION`
+- MockMvc clears the framework-managed `XSRF-TOKEN` on logout but does not replicate
+  the container's expiration of the renamed session cookie (verified: `POSDOCSESSION`
+  is absent from a MockMvc logout response), so it cannot demonstrate this.
+- The logout success handler now performs **explicit cookie cleanup**: it writes
+  `Set-Cookie: POSDOCSESSION=; Max-Age=0; Path=…; Secure; SameSite=…` from the
+  configured session-cookie properties (`ServerProperties`), so the renamed session
+  cookie is deterministically expired (the server-side session is still invalidated
+  by `SecurityContextLogoutHandler`).
+- New `LogoutSessionCookieEmbeddedServerTest` (real embedded Tomcat via
+  `RANDOM_PORT`, seeding an authenticated session with a test-only filter since a real
+  Google login is not possible in a test) asserts the logout response carries
+  `POSDOCSESSION` with an empty value and `Max-Age=0`.
+
+### 4. (Low) Whole-stack PDF comparison is now one-to-one
+- `scripts/verify-container-stack.sh` previously counted how many downloaded PDFs
+  matched *an* fixture entry (`MATCH=2` would pass even if both were `first.pdf`). It
+  now computes the sorted pair of actual hashes and the sorted pair of expected
+  fixture hashes and requires them to be identical (verified the logic rejects two
+  identical copies and accepts a distinct pair).
 
 ## Corrective pass (this work)
 
@@ -36,7 +85,6 @@ is ready for the review loop. A new commit is made on top of `e59e9d4` (never am
   - A subsequent `POST /auth/logout` that replays the **exact** cookie value in
     `X-XSRF-TOKEN` passes (204) — no double XOR, no 403.
   - A wrong token → `CSRF_TOKEN_INVALID` (403).
-  - A wrong session (stale cookie value) → `CSRF_SESSION_COOKIES_MISMATCH`.
   - Logout invalidates the session (reuse → 401) and clears the XSRF cookie.
 - Existing tests were not weakened: they still prove the authorization matrix,
   session behaviour, and CSRF rejection; the only change was removing a
@@ -133,8 +181,17 @@ Corrective pass (this commit, on top of `e59e9d4`):
       references, `your-`/`change-me`/`test-`/`stack-test` placeholders, and the
       fake test value `a-usable-secret`.
 
-Status: all corrective verifications green. Committed on top of `e59e9d4` (no
-amend); ready for the review loop.
+Review round 2 (this commit, on top of `423ee12`):
+- [x] `sh -n scripts/verify-container-stack.sh` — SYNTAX OK; sorted-hash one-to-one
+      logic verified to reject two identical copies and accept a distinct pair.
+- [x] `./mvnw -B -ntp clean verify` (run 1) — **627 tests, 0 failures, 0 errors, BUILD SUCCESS**.
+- [x] `docker compose --env-file .env.example config --quiet` — COMPOSE OK.
+- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (incl. the new
+      one-to-one PDF comparison and the protected-content / session-cookie behavior).
+- [x] `./mvnw -B -ntp clean verify` (run 2) — **627 tests, 0 failures, 0 errors, BUILD SUCCESS**.
+
+Status: all corrective and review-round-2 verifications green. Committed on top of
+`423ee12` (no amend); ready for the review loop.
 
 ## Notes / deviations
 - **Boot 4 removed `@MockBean`/`@SpyBean`**: the filter-chain test uses

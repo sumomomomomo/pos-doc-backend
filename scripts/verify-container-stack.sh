@@ -975,19 +975,19 @@ done
 echo "content: both PDFs downloaded with correct headers and content-length"
 
 echo "== content: downloaded PDFs are byte-for-byte the fixture PDFs =="
-MATCH=0
-for DOC_ID in "${DOC1}" "${DOC2}"; do
-    ACTUAL_HASH="$(sha256sum "${CONTENT_DIR}/${DOC_ID}.pdf" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
-    for ENTRY in documents/first.pdf documents/second.pdf; do
-        EXPECTED_HASH="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" "${ENTRY}" 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
-        if [ "${ACTUAL_HASH}" = "${EXPECTED_HASH}" ]; then
-            MATCH=$((MATCH + 1))
-            break
-        fi
-    done
-done
-[ "${MATCH}" = "2" ] || { echo "ERROR: downloaded PDFs did not match fixture entries (matched ${MATCH}/2)." >&2; exit 1; }
-echo "content: both downloaded PDFs byte-for-byte equal fixture PDFs"
+# Compare the SORTED pair of actual hashes against the SORTED pair of expected
+# hashes so the match is one-to-one (two identical copies of first.pdf would not
+# pass, even though a naive count of "matched an entry" would reach 2/2).
+EXPECTED_PDF_HASHES="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" documents/first.pdf 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+EXPECTED_PDF_HASHES="${EXPECTED_PDF_HASHES}
+$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" documents/second.pdf 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+ACTUAL_PDF_HASHES="$(sha256sum "${CONTENT_DIR}/${DOC1}.pdf" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+ACTUAL_PDF_HASHES="${ACTUAL_PDF_HASHES}
+$(sha256sum "${CONTENT_DIR}/${DOC2}.pdf" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+EXPECTED_PDF_SORTED="$(printf '%s\n' "${EXPECTED_PDF_HASHES}" | sort)"
+ACTUAL_PDF_SORTED="$(printf '%s\n' "${ACTUAL_PDF_HASHES}" | sort)"
+[ "${ACTUAL_PDF_SORTED}" = "${EXPECTED_PDF_SORTED}" ] || { echo "ERROR: downloaded PDF hashes (sorted: ${ACTUAL_PDF_SORTED}) do not one-to-one equal the fixture hashes (sorted: ${EXPECTED_PDF_SORTED})." >&2; exit 1; }
+echo "content: both downloaded PDFs byte-for-byte equal fixture PDFs (one-to-one)"
 
 echo "== content: download the source ZIP via the authenticated HTTP endpoint =="
 http_download "${ZIP_CONTENT_URL}" "${CONTENT_DIR}/source.zip"

@@ -4,8 +4,10 @@ import java.util.List;
 import java.util.Locale;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.web.server.autoconfigure.ServerProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.authorization.AuthorizationManager;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -19,6 +21,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
@@ -55,7 +58,8 @@ public class GoogleSecurityConfiguration {
 	@Bean
 	public SecurityFilterChain securityFilterChain(HttpSecurity http, SecurityProperties properties,
 			OidcSubjectAuthorizer authorizer, ApiProblemEntryPoint entryPoint, CsrfAccessDeniedHandler csrfHandler,
-			AuthorizationAccessDeniedHandler authorizationHandler, CookieCsrfTokenRepository csrfTokenRepository)
+			AuthorizationAccessDeniedHandler authorizationHandler, CookieCsrfTokenRepository csrfTokenRepository,
+			ServerProperties serverProperties)
 			throws Exception {
 
 		http
@@ -76,9 +80,12 @@ public class GoogleSecurityConfiguration {
 			.logout(logout -> logout
 				.logoutRequestMatcher(isPost("/auth/logout"))
 				// The CsrfLogoutHandler added by the CSRF configurer clears the
-				// XSRF-TOKEN cookie through the same repository; the session is
-				// invalidated by the default logout handler chain.
+				// XSRF-TOKEN cookie; the default SecurityContextLogoutHandler
+				// invalidates the session server-side. The renamed session cookie
+				// (POSDOCSESSION) is expired explicitly here, because the container
+				// does not reliably emit the expiry cookie in the logout response.
 				.logoutSuccessHandler((request, response, authentication) -> {
+					clearSessionCookie(response, serverProperties.getServlet().getSession().getCookie());
 					response.setStatus(HttpServletResponse.SC_NO_CONTENT);
 				}))
 			.exceptionHandling(ex -> ex
@@ -100,19 +107,39 @@ public class GoogleSecurityConfiguration {
 	 * Reads require {@code ROLE_USER}; writes and protected content require
 	 * {@code ROLE_REVIEWER}; the health check and OAuth2 login endpoints are public;
 	 * everything else is denied.
+	 *
+	 * <p>Protected-content matching uses {@link PathPatternRequestMatcher}, which
+	 * matches relative to the servlet context path and, like Spring MVC's own
+	 * {@code PathPattern} routing, ignores matrix (semicolon) variables. This keeps
+	 * the authorization decision aligned with Spring's {@code PathPattern} behavior
+	 * regardless of how the container treats a {@code ;x=1} component, so a request
+	 * that reaches the content controller is never downgraded to a plain read.
 	 */
+	private static final PathPatternRequestMatcher PDF_CONTENT =
+			PathPatternRequestMatcher.pathPattern(HttpMethod.GET,
+					"/pos-records/{posRecordId}/documents/{documentId}/content");
+	private static final PathPatternRequestMatcher SOURCE_ARCHIVE_CONTENT =
+			PathPatternRequestMatcher.pathPattern(HttpMethod.GET,
+					"/pos-records/{posRecordId}/source-archive/content");
+
 	private AuthorizationManager<RequestAuthorizationContext> authorizationManager() {
 		return (authentication, context) -> new AuthorizationDecision(
-				decide(appPath(context.getRequest()),
-						context.getRequest().getMethod().toUpperCase(Locale.ROOT), authentication.get()));
+				decide(context.getRequest(), authentication.get()));
 	}
 
-	private static boolean decide(String path, String method,
+	/**
+	 * Package-visible for direct regression testing of the authorization decision
+	 * (including matrix-variable paths that the servlet stack rejects before they
+	 * reach the controller).
+	 */
+	static boolean decide(HttpServletRequest request,
 			org.springframework.security.core.Authentication authentication) {
+		String path = appPath(request);
+		String method = request.getMethod().toUpperCase(Locale.ROOT);
 		if (isPublic(path, method)) {
 			return true;
 		}
-		if (method.equals("GET") && isProtectedContent(path)) {
+		if (isProtectedContent(request)) {
 			return hasRole(authentication, "ROLE_REVIEWER");
 		}
 		if (isWrite(path, method)) {
@@ -130,9 +157,8 @@ public class GoogleSecurityConfiguration {
 				|| path.startsWith("/login/oauth2/code/");
 	}
 
-	private static boolean isProtectedContent(String path) {
-		return path.matches("/pos-records/[^/]+/documents/[^/]+/content")
-				|| path.matches("/pos-records/[^/]+/source-archive/content");
+	private static boolean isProtectedContent(HttpServletRequest request) {
+		return PDF_CONTENT.matches(request) || SOURCE_ARCHIVE_CONTENT.matches(request);
 	}
 
 	private static boolean isWrite(String path, String method) {
@@ -182,6 +208,34 @@ public class GoogleSecurityConfiguration {
 
 	private static boolean isPost(HttpServletRequest request, String path) {
 		return "POST".equalsIgnoreCase(request.getMethod()) && path.equals(appPath(request));
+	}
+
+	/**
+	 * Expires the configured session cookie so the browser deletes it on logout.
+	 * The cookie is cleared by name with an empty value and {@code Max-Age=0},
+	 * matching the configured path/domain/secure/same-site so the browser identifies
+	 * the same cookie. This is explicit cookie cleanup: the server-side session is
+	 * invalidated by {@code SecurityContextLogoutHandler}, but the renamed session
+	 * cookie is not reliably expired by the container in the logout response. The
+	 * header is written directly (rather than via {@code addCookie}) so the expiry
+	 * is expressed as {@code Max-Age=0} regardless of the container's session-cookie
+	 * serialization.
+	 */
+	private static void clearSessionCookie(HttpServletResponse response,
+			org.springframework.boot.web.server.Cookie sessionCookie) {
+		StringBuilder header = new StringBuilder();
+		header.append(sessionCookie.getName()).append("=; Max-Age=0");
+		header.append("; Path=").append(sessionCookie.getPath() != null ? sessionCookie.getPath() : "/");
+		if (sessionCookie.getDomain() != null) {
+			header.append("; Domain=").append(sessionCookie.getDomain());
+		}
+		if (Boolean.TRUE.equals(sessionCookie.getSecure())) {
+			header.append("; Secure");
+		}
+		if (sessionCookie.getSameSite() != null) {
+			header.append("; SameSite=").append(sessionCookie.getSameSite().name());
+		}
+		response.addHeader("Set-Cookie", header.toString());
 	}
 
 	/**
