@@ -1,0 +1,23 @@
+# Local-development port publication for compose.yaml.
+#
+# The base compose.yaml deliberately publishes NO host ports (production-safe: it
+# must not bind services on every host interface). For local development, apply this
+# override to publish the ports on 127.0.0.1 (loopback only, not the LAN):
+#
+#   docker compose -f compose.yaml -f compose.dev.yaml --env-file .env up --build
+#
+# All development ports are bound to 127.0.0.1 only. The MinIO console (9001) and
+# RabbitMQ management (15672) are local-development conveniences and must never be
+# bound to a public or LAN interface.
+services:
+  backend:
+    ports:
+      - "127.0.0.1:18080:18080"
+  minio:
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+  rabbitmq:
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"

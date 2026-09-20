@@ -52,7 +52,10 @@ public final class SecurityProperties {
 		this.viewerSubjects = Set.copyOf(viewer);
 		this.reviewerSubjects = Set.copyOf(reviewer);
 
-		String redirect = (postLoginRedirect == null || postLoginRedirect.isBlank()) ? "/" : postLoginRedirect;
+		// The default destination is the POS application subpage (the frontend serves
+		// the POS app at /pos/). A blank/null value falls back to it rather than the
+		// website homepage.
+		String redirect = (postLoginRedirect == null || postLoginRedirect.isBlank()) ? "/pos/" : postLoginRedirect;
 		validatePostLoginRedirect(redirect);
 		this.postLoginRedirect = redirect;
 

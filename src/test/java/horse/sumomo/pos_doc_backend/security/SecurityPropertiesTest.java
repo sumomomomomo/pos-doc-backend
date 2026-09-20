@@ -110,9 +110,16 @@ class SecurityPropertiesTest {
 	}
 
 	@Test
-	void blankRedirectDefaultsToRoot() {
+	void blankRedirectDefaultsToFrontendSubpage() {
+		// A blank value falls back to the POS application subpage, not the homepage.
 		SecurityProperties p = new SecurityProperties("google", valid(), List.of(), "", "");
-		assertEquals("/", p.postLoginRedirect());
+		assertEquals("/pos/", p.postLoginRedirect());
+	}
+
+	@Test
+	void explicitFrontendSubpageRedirectAccepted() {
+		SecurityProperties p = new SecurityProperties("google", valid(), List.of(), "/pos/", "");
+		assertEquals("/pos/", p.postLoginRedirect());
 	}
 
 	// 6. Wildcard/path/query/fragment CORS origins are rejected.

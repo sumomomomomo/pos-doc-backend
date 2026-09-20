@@ -109,7 +109,7 @@ UPLOAD_RESPONSE_FILE=""
 CONTENT_DIR=""
 
 cleanup() {
-    docker compose --env-file "${ENV_FILE}" -p "${PROJECT_NAME}" -f compose.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
+    docker compose --env-file "${ENV_FILE}" -p "${PROJECT_NAME}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
     if [ -n "${ENV_FILE}" ]; then
         rm -f "${ENV_FILE}"
         ENV_FILE=""
@@ -153,7 +153,7 @@ wait_for_url() {
 ocr_request_count() {
     local response
     response="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" \
-        -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+        -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml exec -T backend \
         curl --fail --silent --show-error \
             --request POST \
             --header "Content-Type: application/json" \
@@ -238,20 +238,20 @@ http_download() {
 # --- 1: validate compose configuration ---------------------------------------
 
 # Ensure a clean slate: tear down any leftover stack from a previous run.
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml down --volumes --remove-orphans >/dev/null 2>&1 || true
 
 echo "== compose config =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml config --quiet
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml config --quiet
 
 # --- 2: build the backend image ----------------------------------------------
 
 echo "== build backend =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml build backend
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml build backend
 
 # --- 3: start the stack and wait for healthy ----------------------------------
 
 echo "== up --detach --wait =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml up --detach --wait
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml up --detach --wait
 
 # --- 4: MinIO liveness --------------------------------------------------------
 
@@ -280,7 +280,7 @@ echo "detail: unknown id -> 404 POS_RECORD_NOT_FOUND"
 echo "== sqlite file check =="
 # Wrap in sh -c so Windows shells (MSYS/Git Bash) do not rewrite the absolute
 # /data/... path to a host path before it reaches the container.
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
 echo "sqlite: database file present in backend container"
 
 # --- 8: upload a persistence marker with one-shot mc --------------------------
@@ -291,7 +291,7 @@ MINIO_ALIAS_SETUP='mc alias set --quiet local "http://minio:9000" "$MINIO_ROOT_U
 # `docker compose run` inherits. We do not pass `--entrypoint /bin/sh` here
 # because MSYS-based shells (Git Bash) rewrite the absolute path argument to
 # a host path before it reaches the CLI.
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; printf 'minio-persistence-check' | mc pipe local/pos-documents-test/smoke/persistence.txt >/dev/null"
 echo "minio: marker uploaded"
@@ -299,11 +299,11 @@ echo "minio: marker uploaded"
 # --- 9: restart only MinIO and verify the marker survived ---------------------
 
 echo "== restart minio =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart minio
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml restart minio
 wait_for_url "http://localhost:9000/minio/health/live" 60
 
 echo "== verify marker survived minio restart =="
-MARKER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+MARKER="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; mc cat local/pos-documents-test/smoke/persistence.txt 2>/dev/null")"
 if [ "${MARKER}" = "minio-persistence-check" ]; then
@@ -316,10 +316,10 @@ fi
 # --- 10: restart only the backend and re-verify --------------------------------
 
 echo "== restart backend =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart backend
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml restart backend
 i=0
 while [ "${i}" -lt 60 ]; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
     if [ "${STATUS}" = "healthy" ]; then
         break
     fi
@@ -333,7 +333,7 @@ fi
 echo "backend: healthy after restart"
 
 echo "== re-check sqlite file and detail 404 =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml exec -T backend sh -c 'test -s /data/sqlite/pos-doc.db'
 echo "sqlite: still present after backend restart"
 http_get_retry "http://localhost:18080/api/v1/pos-records/11111111-1111-1111-1111-111111111111" 404 "detail after backend restart"
 printf '%s' "${HTTP_BODY}" | grep -q "POS_RECORD_NOT_FOUND" || { echo "ERROR: detail 404 missing POS_RECORD_NOT_FOUND after restart: ${HTTP_BODY}" >&2; exit 1; }
@@ -345,7 +345,7 @@ echo "== rabbitmq health check =="
 i=0
 RABBIT_STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q rabbitmq)" 2>/dev/null || echo starting)"
+    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml ps -q rabbitmq)" 2>/dev/null || echo starting)"
     if [ "${RABBIT_STATUS}" = "healthy" ]; then
         break
     fi
@@ -494,11 +494,11 @@ echo "message: identifiers only, no fixture metadata"
 # --- 14: RabbitMQ restart keeps the durable queue and its message -------------
 
 echo "== restart rabbitmq =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart rabbitmq
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml restart rabbitmq
 i=0
 RABBIT_STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q rabbitmq)" 2>/dev/null || echo starting)"
+    RABBIT_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml ps -q rabbitmq)" 2>/dev/null || echo starting)"
     if [ "${RABBIT_STATUS}" = "healthy" ]; then
         break
     fi
@@ -534,11 +534,11 @@ echo "queue: persistent message survived rabbitmq restart"
 # --- 15: backend restart keeps the job queryable and queued -------------------
 
 echo "== restart backend after rabbitmq restart =="
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml restart backend
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml restart backend
 i=0
 STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
     if [ "${STATUS}" = "healthy" ]; then
         break
     fi
@@ -573,11 +573,11 @@ RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
 INGESTION_CONSUMER_ENABLED=true
 ${SECURITY_ENV}
 EOF
-docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml up --detach --wait backend >/dev/null
+docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml up --detach --wait backend >/dev/null
 i=0
 STATUS="starting"
 while [ "${i}" -lt 60 ]; do
-    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
+    STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml ps -q backend)" 2>/dev/null || echo starting)"
     if [ "${STATUS}" = "healthy" ]; then
         break
     fi
@@ -690,7 +690,7 @@ done
 echo "queues: empty"
 
 echo "== source archive and two UUID-keyed PDFs are in MinIO =="
-KEYS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+KEYS="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
 SOURCE_COUNT="$(printf '%s' "${KEYS}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
@@ -717,7 +717,7 @@ for KEY in ${PDF_KEYS}; do
     SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
     # --quiet suppresses docker compose's own stdout (container lifecycle
     # messages) so only the mc cat payload reaches the file.
-    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps --quiet \
+    docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml run --rm --no-deps --quiet \
         -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
         minio-init "${MINIO_ALIAS_SETUP}; mc cat local/${MINIO_BUCKET}/${KEY} 2>/dev/null" > "${EXTRACT_DIR}/${SAFE_KEY}"
 done
@@ -748,7 +748,7 @@ rm -rf "${EXTRACT_DIR}"
 # --- Task 9: OCR verification (before duplicate delivery) ---------------------
 
 echo "== OCR stub health check (WireMock) =="
-OCR_STUB_HTTP_CODE="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml exec -T backend \
+OCR_STUB_HTTP_CODE="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml exec -T backend \
     sh -c 'curl --silent --max-time 15 --output /dev/null --write-out "%{http_code}" http://ocr-stub:8080/__admin/mappings 2>/dev/null || echo 000')"
 if [ "${OCR_STUB_HTTP_CODE}" != "200" ]; then
     echo "ERROR: OCR stub (WireMock) is not healthy: HTTP ${OCR_STUB_HTTP_CODE} from /__admin/mappings" >&2
@@ -789,7 +789,7 @@ fi
 echo "pos_record: REVIEW_REQUIRED"
 
 echo "== MinIO still contains the original ZIP and extracted PDFs =="
-KEYS_BEFORE_DUP="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.test-ocr.yaml run --rm --no-deps \
+KEYS_BEFORE_DUP="$(docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml run --rm --no-deps \
     -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
     minio-init "${MINIO_ALIAS_SETUP}; mc ls --recursive local/${MINIO_BUCKET}/ 2>/dev/null" | tr -d '\r')"
 SRC_BEFORE_DUP="$(printf '%s' "${KEYS_BEFORE_DUP}" | grep -c "archives/${POS_RECORD_ID}/" || true)"
