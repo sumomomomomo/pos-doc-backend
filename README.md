@@ -19,7 +19,7 @@ only) via `compose.dev.yaml`:
 
 The base `compose.yaml` publishes **no** host ports (production-safe). The ports
 above come from the development override `compose.dev.yaml`; production publishes
-only the backend on the Nginx host interface (see
+only the backend on the backend server's LAN interface (see
 [Production deployment](#production-deployment)). Ports `9001` and `15672` are
 **local-development management ports and must never be publicly or LAN exposed**.
 
@@ -95,8 +95,8 @@ assumption is protected by `OauthForwardedHeaderTest`.
 
 ### Deploying
 
-Use the production override, which publishes only the backend port on the Nginx
-host interface and pins google mode:
+Use the production override, which publishes only the backend port on the backend
+server's LAN interface and pins google mode (and clears the test profile):
 
 ```bash
 docker compose -f compose.yaml -f compose.production.yaml --env-file .env up --build
@@ -121,15 +121,19 @@ APP_SECURITY_POST_LOGIN_REDIRECT=/pos/
 The base `compose.yaml` publishes **no** host ports. `compose.production.yaml`
 re-adds only the one port the reverse proxy needs and pins the security mode:
 
-- Backend `18080` is bound to `192.168.1.35` (the Nginx / reverse-proxy host) and
-  trusted administration hosts only — never `0.0.0.0`. The backend trusts
-  `X-Forwarded-*` headers, so untrusted clients must not be able to reach it
-  directly and forge them; the host firewall should additionally restrict
-  `18080` to those source hosts.
+- Backend `18080` is bound to `192.168.1.35` (the backend server's LAN interface) —
+  never `0.0.0.0`. Binding to a specific interface stops it being exposed on the
+  server's other local interfaces, but it does **not** by itself restrict *clients*:
+  any LAN host that can reach `192.168.1.35:18080` can still connect. The host
+  firewall must therefore additionally allow TCP `18080` only from the Nginx server
+  (and trusted administration hosts). This is required because the backend trusts
+  `X-Forwarded-*` headers, so an untrusted client that could reach it directly could
+  forge them.
 - MinIO (`9000`/`9001`) and RabbitMQ (`5672`/`15672`) are **not** published to the
   LAN; they are reachable only on the compose internal network.
 - `stack-test` authentication is never enabled in production (the override pins
-  `APP_SECURITY_MODE=google` and an empty stack-test token).
+  `APP_SECURITY_MODE=google`, an empty stack-test token, and an empty
+  `SPRING_PROFILES_ACTIVE`).
 - The OCR service (`192.168.1.34:8080`) is an internal backend-to-backend
   dependency and must **not** be exposed through Nginx (enforced in the frontend
   repository's Nginx configuration).

@@ -232,10 +232,16 @@ needed):
 5. **Production network restrictions.** The base `compose.yaml` now publishes **no**
    host ports (production-safe). New `compose.dev.yaml` publishes the development
    ports on `127.0.0.1` only; new `compose.production.yaml` publishes only the backend
-   on `192.168.1.35:18080` and pins `APP_SECURITY_MODE=google` with an empty
-   stack-test token. MinIO (9000/9001) and RabbitMQ (5672/15672) are not published to
-   the LAN; the OCR host must not be exposed through Nginx (frontend-repo concern).
-   `scripts/verify-container-stack.sh` now applies the dev override.
+   on the backend server's LAN interface (`192.168.1.35:18080`) and pins
+   `APP_SECURITY_MODE=google`, an empty stack-test token, and an empty
+   `SPRING_PROFILES_ACTIVE`. Binding to `192.168.1.35` (the backend server's LAN
+   interface, not the Nginx host) stops exposure on the server's other interfaces but
+   does not by itself restrict clients, so the host firewall must additionally allow
+   TCP `18080` only from the Nginx server (required because the backend trusts
+   `X-Forwarded-*` headers). MinIO (9000/9001) and RabbitMQ (5672/15672) are not
+   published to the LAN; the OCR host must not be exposed through Nginx
+   (frontend-repo concern). `scripts/verify-container-stack.sh` now applies the dev
+   override.
    - Note: Docker Compose **merges** (does not replace) `ports` lists on override, so
      an override `ports: []` cannot remove the base ports; the ports were therefore
      removed from the base file and re-added per-environment (the approach the task
@@ -252,9 +258,19 @@ needed):
       override).
 - [x] `./mvnw -B -ntp clean verify` (run 2) — **630 tests, 0 failures, 0 errors, BUILD SUCCESS**.
 
-Status: final MVP integration changes complete and verified; in a new PR (not yet
-pushed) pending the manual end-to-end integration acceptance test, which is handled
-separately.
+Status: final MVP integration changes complete and verified; in PR #1
+(branch `final-mvp-integration`) pending the manual end-to-end integration acceptance
+test, which is handled separately.
+
+### PR #1 review corrections
+Two minor corrections from the PR review (no architectural change):
+1. Corrected the network-boundary wording: `192.168.1.35` is the **backend
+   server's LAN interface**, not the Nginx host. Binding there stops exposure on
+   other local interfaces but does not restrict clients, so the README and
+   `compose.production.yaml` now carry an explicit requirement to firewall TCP `18080`
+   to the Nginx server only.
+2. The production override now also pins `SPRING_PROFILES_ACTIVE: ""`, so an
+   accidental `.env` value cannot activate the `stack-test` profile.
 
 ## Notes / deviations
 - **Boot 4 removed `@MockBean`/`@SpyBean`**: the filter-chain test uses
