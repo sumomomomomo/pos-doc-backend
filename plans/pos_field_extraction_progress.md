@@ -68,9 +68,10 @@ Branch: `task-pos-field-extraction` (base `main`)
 - [x] New tests: backoff-interruption escaping, `UNKNOWN (123)` sentinel, trailing-newline trim, long names, label/prose-without-colon, redelivery no-re-render of a COMPLETED candidate, user-update-between-requests, timestamp/version-only-on-update, and a real-broker partial-recovery scenario (transient render failure on the second candidate; first candidate not re-rendered).
 
 ## Final verification (consistent result)
-- [x] `./mvnw -o test` — **711 tests, 0 failures, 0 errors** (full suite, after round 2).
+- [x] `./mvnw -o clean verify` (run 1) — **711 tests, 0 failures, 0 errors**.
+- [x] `./mvnw -o clean verify` (run 2) — **711 tests, 0 failures, 0 errors**.
 - [x] `docker compose --env-file .env.example config --quiet` — OK.
-- [ ] `scripts/verify-container-stack.sh` — to re-run after corrections (needs the container stack + OCR stub).
+- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (job COMPLETED/attemptCount=1; candidate COMPLETED + non-candidate SKIPPED; exactly 3 OCR requests (one per field) and still 3 after duplicate delivery; 3 version-2 RESOLVED outcomes; field values Charlie Henry / John Davidson / 2026-07-26 applied).
 
 ## Deviations from spec
 - Kept `DocumentOcrPersistenceService` + its integration tests (historical, for the retained `document_ocr_result` table); it is no longer on the consumer path.
