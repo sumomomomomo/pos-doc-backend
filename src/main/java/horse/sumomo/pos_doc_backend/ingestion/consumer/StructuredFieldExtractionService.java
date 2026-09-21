@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,23 +32,38 @@ import horse.sumomo.pos_doc_backend.rendering.service.RenderingException;
 /**
  * Best-effort structured field-extraction workflow.
  *
- * <p>For a record's PDFs it selects exactly one candidate document, renders the
- * candidate's first page once, and makes up to one structured HTTP call per
- * unresolved business field (three fields in a fixed order), reusing the same
- * rendered PNG for every call. Non-candidate documents are marked
- * {@code SKIPPED}. Every model call is followed by a durable outcome
- * ({@code RESOLVED}/{@code UNKNOWN}/{@code FAILED}) before the candidate is
- * marked {@code COMPLETED}; resolved values are applied to the record with a
- * null-guarded optimistic update. When there is no candidate (two to ten PDFs
- * with no {@code LAPPe.pdf} match), all PDFs are marked {@code SKIPPED} and no
- * model calls are made. The workflow then completes the job and moves the
- * record to {@code REVIEW_REQUIRED} (null business fields are allowed).
+ * <p>For a record's PDFs it selects the candidate documents (every
+ * case-sensitive {@code LAPPe.pdf}, or the first up to ten PDFs when none
+ * match), then processes them <em>sequentially</em>, requesting only the fields
+ * that are still unresolved, and stopping as soon as every field resolves. Each
+ * candidate's first page is rendered <em>once</em> and reused across its fields.
+ *
+ * <p>Outcomes are best-effort and durable: every model call is followed by a
+ * durable {@code RESOLVED}/{@code UNKNOWN}/{@code FAILED} outcome, and only the
+ * value stored in the winning (authoritative) upsert row is applied to the
+ * record. A field left {@code UNKNOWN}/{@code FAILED} keeps the record's
+ * business field null. Non-candidate and not-needed documents are marked
+ * {@code SKIPPED}; the workflow always completes the job and moves the record to
+ * {@code REVIEW_REQUIRED} (null business fields are allowed).
+ *
+ * <p>Failure handling:
+ * <ul>
+ *   <li>A <em>permanent</em> render failure for a candidate (corrupt/encrypted/
+ *       invalid PDF) marks that candidate {@code FAILED} and continues with the
+ *       next candidate.</li>
+ *   <li>A <em>temporary</em> storage/rendering failure, and any interruption,
+ *       escapes as a retryable {@link ConsumerException} for the listener's
+ *       bounded retry / DLQ path (an interruption preserves the interrupt
+ *       flag).</li>
+ *   <li>Per-field model failures are retried within the field (bounded); a
+ *       non-retryable model error is recorded as a durable {@code FAILED}
+ *       outcome (best-effort), and an answer rejected by validation is retried.</li>
+ * </ul>
  *
  * <p>This service is <em>not</em> annotated with {@code @Transactional}: each
  * persistence step is its own short transaction (via
  * {@link FieldExtractionPersistenceService}), and the render/HTTP calls run
- * outside any transaction. All failures are surfaced as
- * {@link ConsumerException} so the listener's bounded retry/DLQ logic applies.
+ * outside any transaction.
  *
  * <p>Never logs OCR text, prompts, or PII.
  */
@@ -88,27 +104,60 @@ public class StructuredFieldExtractionService {
 		int version = FieldExtractionPrompts.PROMPT_VERSION;
 
 		List<DocumentSnapshot> pdfs = this.persistence.snapshotPosDocuments(posRecordId);
-		Optional<UUID> candidate = DocumentCandidateSelector.select(pdfs);
+		List<DocumentSnapshot> candidates = DocumentCandidateSelector.select(pdfs);
+		Set<UUID> candidateIds = candidates.stream().map(DocumentSnapshot::documentId)
+				.collect(Collectors.toSet());
+		List<UUID> nonCandidates = pdfs.stream().map(DocumentSnapshot::documentId)
+				.filter(id -> !candidateIds.contains(id)).toList();
+		this.persistence.markDocumentsSkipped(nonCandidates);
 
-		if (candidate.isPresent()) {
-			UUID candidateId = candidate.get();
-			List<UUID> nonCandidates = pdfs.stream().map(DocumentSnapshot::documentId)
-					.filter(id -> !id.equals(candidateId)).toList();
-			this.persistence.markDocumentsSkipped(nonCandidates);
-			this.processCandidate(posRecordId, candidateId, version);
-		}
-		else {
-			// Two to ten PDFs with no LAPPe.pdf match: no candidate. Skip all PDFs.
-			this.persistence.markDocumentsSkipped(pdfs.stream().map(DocumentSnapshot::documentId).toList());
+		for (int i = 0; i < candidates.size(); i++) {
+			if (allFieldsResolved(posRecordId)) {
+				// Every field is resolved: this candidate and the rest are not
+				// needed, so mark them SKIPPED and stop.
+				List<UUID> notNeeded = candidates.subList(i, candidates.size()).stream()
+						.map(DocumentSnapshot::documentId).toList();
+				this.persistence.markDocumentsSkipped(notNeeded);
+				break;
+			}
+			this.processCandidate(posRecordId, candidates.get(i).documentId(), version);
 		}
 
 		this.persistence.completeWorkflow(jobId, posRecordId, Instant.now());
 	}
 
+	private boolean allFieldsResolved(UUID posRecordId) {
+		return this.persistence.resolvedBusinessFields(posRecordId).containsAll(FIELD_ORDER);
+	}
+
 	private void processCandidate(UUID posRecordId, UUID candidateId, int version) {
 		this.persistence.markDocumentProcessing(candidateId);
-		try (RenderedFirstPage page = this.openPage(candidateId)) {
+		RenderedFirstPage page;
+		try {
+			page = this.renderService.prepare(candidateId);
+		}
+		catch (RenderingException ex) {
+			if (ex.getCode().retryable()) {
+				// Temporary storage/rendering failure, or an interruption: escape to
+				// the listener's bounded retry / DLQ path. An interruption preserves
+				// the interrupt flag.
+				if (ex.getCode() == RenderingException.Code.RENDER_INTERRUPTED) {
+					Thread.currentThread().interrupt();
+				}
+				throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, ex);
+			}
+			// Permanent (corrupt/encrypted/invalid PDF): mark this candidate FAILED and
+			// continue with the next candidate (best-effort; the job still completes).
+			this.persistence.markDocumentFailed(candidateId);
+			log.debug("Candidate render failed permanently; marked FAILED; documentId={}", candidateId);
+			return;
+		}
+		try (page) {
+			Set<ExtractionField> alreadyResolved = this.persistence.resolvedBusinessFields(posRecordId);
 			for (ExtractionField field : FIELD_ORDER) {
+				if (alreadyResolved.contains(field)) {
+					continue;
+				}
 				this.processField(posRecordId, candidateId, field, version, page);
 			}
 			this.persistence.markDocumentCompleted(candidateId);
@@ -116,100 +165,93 @@ public class StructuredFieldExtractionService {
 		log.debug("Candidate processed; documentId={}", candidateId);
 	}
 
-	/**
-	 * Renders the candidate's first page once, converting any rendering failure
-	 * into a {@link ConsumerException} for the listener's retry/DLQ logic.
-	 */
-	private RenderedFirstPage openPage(UUID candidateId) {
-		try {
-			return this.renderService.prepare(candidateId);
-		}
-		catch (RenderingException ex) {
-			throw toConsumerException(ex);
-		}
-	}
-
 	private void processField(UUID posRecordId, UUID candidateId, ExtractionField field, int version,
 			RenderedFirstPage page) {
-		// Refresh which fields are still null; skip fields already resolved.
-		Set<ExtractionField> resolved = this.persistence.resolvedBusinessFields(posRecordId);
-		if (resolved.contains(field)) {
-			log.debug("Field already resolved; skipping; field={}", field.name());
-			return;
-		}
-
-		// A durable outcome for (candidate, field, version) is authoritative: no model call.
+		// A durable outcome for (candidate, field, version) is authoritative: no model
+		// call; apply only if the durable row is RESOLVED.
 		Optional<PosFieldExtractionEntity> existing = this.persistence.loadOutcome(candidateId, field, version);
 		if (existing.isPresent()) {
-			PosFieldExtractionEntity row = existing.get();
-			if (row.getOutcome() == ExtractionOutcome.RESOLVED) {
-				this.persistence.applyResolvedField(posRecordId, field, row.getValueText());
-			}
-			log.debug("Durable outcome present; no model call; field={}; outcome={}", field.name(),
-					row.getOutcome());
+			this.applyIfResolved(posRecordId, field, existing.get());
 			return;
 		}
 
-		// No durable outcome: run up to maxAttempts attempts.
 		String prompt = FieldExtractionPrompts.promptFor(field);
 		int maxAttempts = this.properties.maxAttempts();
 		String lastErrorCode = null;
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+			OcrResult ocr;
+			FieldAnswerParse parse;
 			try {
-				OcrResult ocr = this.ocrClient.recognize(page, prompt, version);
-				FieldAnswerParse parse = FieldAnswerParser.parse(field, ocr.text());
-				switch (parse.kind()) {
-					case RESOLVED -> {
-						this.upsertOutcome(candidateId, field, version, ExtractionOutcome.RESOLVED,
-								parse.value(), ocr.model(), ocr.finishReason(), attempt, null);
-						this.persistence.applyResolvedField(posRecordId, field, parse.value());
-						return;
-					}
-					case UNKNOWN -> {
-						this.upsertOutcome(candidateId, field, version, ExtractionOutcome.UNKNOWN, null,
-								ocr.model(), ocr.finishReason(), attempt, null);
-						return;
-					}
-					case INVALID -> {
-						// A blank/unparseable/not-matching answer is not UNKNOWN:
-						// treat it as a failed attempt and retry.
-						lastErrorCode = ERROR_CODE_INVALID_ANSWER;
-					}
-				}
+				ocr = this.ocrClient.recognize(page, prompt, version);
+				parse = FieldAnswerParser.parse(field, ocr.text());
 			}
 			catch (OcrException ex) {
-				if (ex.getCode().retryable()) {
-					lastErrorCode = ex.getCode().code();
+				if (ex.getCode() == OcrException.Code.OCR_INTERRUPTED) {
+					// Preserve the interrupt flag and escape to the RabbitMQ retry path;
+					// an interruption must not become a persisted FAILED outcome.
+					Thread.currentThread().interrupt();
+					throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, ex);
 				}
-				else {
-					this.upsertOutcome(candidateId, field, version, ExtractionOutcome.FAILED, null,
-							this.properties.model(), null, attempt, ex.getCode().code());
+				if (!ex.getCode().retryable()) {
+					PosFieldExtractionEntity row = this.upsertOutcome(candidateId, field, version,
+							ExtractionOutcome.FAILED, null, this.properties.model(), null, attempt,
+							ex.getCode().code());
+					this.applyIfResolved(posRecordId, field, row);
 					return;
 				}
+				// Retryable transport/service failure: retry.
+				lastErrorCode = ex.getCode().code();
+				this.sleepUnlessLastAttempt(attempt, maxAttempts);
+				continue;
 			}
-			if (attempt < maxAttempts) {
-				this.backoff.sleep(this.properties.retryBackoffMs());
+			if (parse.kind() == FieldAnswerParse.ParseKind.INVALID) {
+				// Answer rejected by field validation: retry.
+				lastErrorCode = ERROR_CODE_INVALID_ANSWER;
+				this.sleepUnlessLastAttempt(attempt, maxAttempts);
+				continue;
 			}
+			ExtractionOutcome outcome = parse.kind() == FieldAnswerParse.ParseKind.RESOLVED
+					? ExtractionOutcome.RESOLVED : ExtractionOutcome.UNKNOWN;
+			String value = outcome == ExtractionOutcome.RESOLVED ? parse.value() : null;
+			PosFieldExtractionEntity row = this.upsertOutcome(candidateId, field, version, outcome, value,
+					ocr.model(), ocr.finishReason(), attempt, null);
+			this.applyIfResolved(posRecordId, field, row);
+			return;
 		}
-		// All attempts failed (retryable failures and/or invalid answers).
-		this.upsertOutcome(candidateId, field, version, ExtractionOutcome.FAILED, null,
-				this.properties.model(), null, maxAttempts, lastErrorCode);
+		// All attempts exhausted (retryable failures and/or invalid answers): FAILED.
+		PosFieldExtractionEntity row = this.upsertOutcome(candidateId, field, version, ExtractionOutcome.FAILED,
+				null, this.properties.model(), null, maxAttempts, lastErrorCode);
+		this.applyIfResolved(posRecordId, field, row);
 	}
 
-	private void upsertOutcome(UUID candidateId, ExtractionField field, int version, ExtractionOutcome outcome,
-			String value, String model, String finishReason, int attempts, String errorCode) {
+	/**
+	 * Applies a resolved value to the record only when the supplied durable row is
+	 * {@code RESOLVED}. The applied value is always the row's stored
+	 * {@code value_text} (never a value proposed locally), so a losing caller in an
+	 * upsert race cannot apply an unrecorded value.
+	 */
+	private void applyIfResolved(UUID posRecordId, ExtractionField field, PosFieldExtractionEntity row) {
+		if (row.getOutcome() == ExtractionOutcome.RESOLVED) {
+			this.persistence.applyResolvedField(posRecordId, field, row.getValueText());
+		}
+	}
+
+	private PosFieldExtractionEntity upsertOutcome(UUID candidateId, ExtractionField field, int version,
+			ExtractionOutcome outcome, String value, String model, String finishReason, int attempts,
+			String errorCode) {
 		PosFieldExtractionId id = new PosFieldExtractionId(candidateId, field.name(), version);
-		PosFieldExtractionEntity entity = new PosFieldExtractionEntity(id, outcome, value, model, finishReason,
+		PosFieldExtractionEntity proposed = new PosFieldExtractionEntity(id, outcome, value, model, finishReason,
 				attempts, errorCode, Instant.now());
-		this.persistence.upsertExtractionOutcome(entity);
-		log.debug("Field outcome durable; field={}; outcome={}; attempts={}", field.name(), outcome, attempts);
+		PosFieldExtractionEntity durable = this.persistence.upsertExtractionOutcome(proposed);
+		log.debug("Field outcome durable; field={}; outcome={}; attempts={}", field.name(), durable.getOutcome(),
+				durable.getAttemptCount());
+		return durable;
 	}
 
-	private ConsumerException toConsumerException(RenderingException ex) {
-		if (ex.getCode().retryable()) {
-			return new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, ex);
+	private void sleepUnlessLastAttempt(int attempt, int maxAttempts) {
+		if (attempt < maxAttempts) {
+			this.backoff.sleep(this.properties.retryBackoffMs());
 		}
-		return new ConsumerException(ConsumerException.Code.EXTRACTION_STATE_CONFLICT, ex);
 	}
 
 }

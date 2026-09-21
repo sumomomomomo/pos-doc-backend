@@ -211,7 +211,7 @@ class FieldExtractionEndToEndIntegrationTest {
 		String candidateStatus = this.jdbc.queryForObject(
 				"SELECT d.processing_status FROM pos_document d "
 						+ "JOIN storage_object s ON d.storage_object_id = s.id "
-						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'lappe.pdf'",
+						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'LAPPe.pdf'",
 				String.class, posRecordId.toString());
 		assertEquals("COMPLETED", candidateStatus, "the LAPPe.pdf candidate must be COMPLETED");
 		String otherStatus = this.jdbc.queryForObject(
@@ -224,7 +224,7 @@ class FieldExtractionEndToEndIntegrationTest {
 		// Three version-2 durable outcomes for the candidate.
 		String candidateId = this.jdbc.queryForObject(
 				"SELECT d.id FROM pos_document d JOIN storage_object s ON d.storage_object_id = s.id "
-						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'lappe.pdf'",
+						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'LAPPe.pdf'",
 				String.class, posRecordId.toString());
 		int outcomeCount = this.jdbc.queryForObject(
 				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND prompt_version = 2",

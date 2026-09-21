@@ -47,6 +47,18 @@ Branch: `task-pos-field-extraction` (base `main`)
 - [x] docker compose --env-file .env.example config --quiet
 - [x] scripts/verify-container-stack.sh -> ALL CHECKS PASSED
 
+## ChatGPT review fixes (PR #3 — 5 merge blockers)
+- [x] **1. Candidate selection** — `DocumentCandidateSelector` now returns a `List<DocumentSnapshot>`: every case-sensitive `LAPPe.pdf` basename (sequence order), or the first up to 10 PDFs when none match. `ArchiveExtractionService.lastSegment()` now preserves case (was lowercasing), so the case-sensitive match is possible.
+- [x] **2. Permanent render failure** — a non-retryable render failure marks the candidate `FAILED` (new `markDocumentFailed`) and continues to the next candidate; the job still completes `COMPLETED`. Temporary render failure and interruption escape as a retryable `ConsumerException`.
+- [x] **3. Answer parser** — strict validation: rejects newlines (not collapsed), unmatched quotes, backticks, field labels (colon), list markers, "A or B" alternatives, and prose (>4 words / disallowed chars); requires a Unicode letter; restricts names to letters/spaces/apostrophes/hyphens; strips a trailing bracketed ID; `NOT FOUND`/`UNKNOWN`/etc. are `UNKNOWN` (not a name).
+- [x] **4. Authoritative upsert** — `applyIfResolved` applies only the durable row's `value_text` (never a locally-proposed value), so a losing upsert caller cannot apply an unrecorded value.
+- [x] **5. Retry/interruption classification** — `OCR_RESPONSE_INVALID`, `OCR_OUTPUT_EMPTY`, `OCR_OUTPUT_TRUNCATED` are now retryable (retried within the field); `OCR_INTERRUPTED` escapes to the RabbitMQ retry path (never persisted as `FAILED`) and preserves the interrupt flag.
+- [x] `LlamaCppOcrClient` de-finalized (test double for interruption escaping; Mockito unavailable).
+- [x] New/updated tests: multi-candidate sequential processing, case-sensitivity (exact match + >10 priority + lowercase decoy), corrupt-candidate→FAILED→continue, upsert-race reconciliation, malformed/empty/truncated retries, interruption escaping, `markDocumentFailed` + completion-with-FAILED, no-calls-when-resolved; parser test rewritten for strict validation.
+- [x] `PosRecordCommandService` comment updated (FAILED is a terminal state that does not block verification).
+- [x] README structured-field-extraction section rewritten for the multi-candidate + case-sensitive + render-failure semantics.
+- [x] Full suite: `./mvnw -o test` — **700 tests, 0 failures, 0 errors**.
+
 ## Deviations from spec
 - Kept `DocumentOcrPersistenceService` + its integration tests (historical, for the retained `document_ocr_result` table); it is no longer on the consumer path.
 - `IngestionRetryIntegrationTest` scenarios 6-7 (OCR-fails-the-job, don't-re-OCR-doc1) removed: obsolete under the best-effort single-candidate workflow; replaced by 503/400 best-effort scenarios.

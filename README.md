@@ -152,34 +152,47 @@ re-adds only the one port the reverse proxy needs and pins the security mode:
 
 ## Structured field extraction
 
-Once a job is dequeued, the consumer extracts three business fields from a single
-candidate document and applies the resolved values to the POS record. This
-replaces the old "OCR every PDF" workflow:
+Once a job is dequeued, the consumer extracts three business fields from the
+record's candidate documents and applies the resolved values to the POS record.
+This replaces the old "OCR every PDF" workflow:
 
-- **Candidate selection** — exactly one document is chosen and rendered:
-  - 1 PDF → that PDF.
-  - 2–10 PDFs → the first `LAPPe.pdf` (case-insensitive basename match); if none
-    is present, **no** candidate is selected and no OCR is performed.
-  - More than 10 PDFs → the first PDF (deterministic fallback).
-- **Render once** — the candidate's first page is rendered to PNG a single time
-  and reused across all three fields.
-- **Three structured calls** — one HTTP request per field (policyholder name,
-  consultant name, submission date), each sent with its own exact prompt
+- **Candidate selection** — candidates are chosen in sequence order:
+  - Every PDF whose basename ends with `LAPPe.pdf` (**case-sensitive**) is a
+    candidate.
+  - If none match, the first up to 10 PDFs are the candidates.
+  - Candidates are processed **sequentially**: for each candidate only the
+    still-unresolved fields are requested, and the workflow stops as soon as
+    every field resolves (a later candidate is used only when an earlier one
+    leaves a field `UNKNOWN`).
+- **Render once** — each candidate's first page is rendered to PNG a single time
+  and reused across that candidate's fields.
+- **Three structured calls** — one HTTP request per unresolved field (policyholder
+  name, consultant name, submission date), each sent with its own exact prompt
   (prompt version 2). The calls are deterministic: temperature `0`, `max_tokens` `128`.
 - **Bounded per-field retry** — each field gets up to 3 attempts (1 + 2 retries)
-  with a short bounded back-off before a terminal outcome is recorded.
+  with a short bounded back-off before a terminal outcome is recorded. Malformed,
+  empty, or truncated model responses are retried within the field.
 - **Durable outcomes** — each (document, field, prompt version) result is
   persisted to `pos_field_extraction` as `RESOLVED` (with the validated value),
   `UNKNOWN` (absent/unreadable), or `FAILED` (a stable, PII-free error code).
-  Values are canonicalized (names trimmed and bounded; the submission date
-  `dd-MMM-yyyy` is validated and stored as ISO `yyyy-MM-dd`).
+  Only the value stored in the winning (authoritative) upsert row is applied to
+  the record. Values are canonicalized (a name must be a short run of letters,
+  spaces, apostrophes, and hyphens; the submission date `dd-MMM-yyyy` is
+  validated and stored as ISO `yyyy-MM-dd`).
+- **Render failure** — a permanent render failure for a candidate (corrupt,
+  encrypted, or otherwise invalid PDF) marks that candidate `FAILED` and the
+  workflow moves on to the next candidate (best-effort; the job still completes).
+  A temporary storage/rendering failure, and any interruption, escape to the
+  consumer's bounded retry / DLQ path (an interruption is never persisted as a
+  `FAILED` outcome).
 - **Best-effort** — a field that is `UNKNOWN` or `FAILED` leaves the record's
-  business field `NULL`; it does **not** fail the job. Resolved values are
-  applied to the record. The record always ends `REVIEW_REQUIRED` (human review
-  is still required).
-- **Non-candidates are skipped** — documents other than the candidate are marked
+  business field `NULL`; it does **not** fail the job. The record always ends
+  `REVIEW_REQUIRED` (human review is still required).
+- **Non-candidates are skipped** — documents that are not candidates (and
+  candidates that become unnecessary once every field is resolved) are marked
   `SKIPPED` and are never rendered or sent to the OCR service.
-- **Worst-case budget** — 3 fields × 3 attempts × ~10 s per request ≈ **90 s**.
+- **Worst-case budget** — each field is bounded to 3 attempts; with a single
+  candidate the worst case is 3 fields × 3 attempts × ~10 s per request ≈ **90 s**.
 
 ## Message queueing and outbox
 

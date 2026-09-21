@@ -2,58 +2,60 @@ package horse.sumomo.pos_doc_backend.ingestion.application;
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
-import java.util.Optional;
-import java.util.UUID;
 
 /**
- * Pure selection rule for the structured field-extraction candidate document.
+ * Pure selection rule for the structured field-extraction candidate documents.
  *
- * <p>Given the record's PDFs (in ZIP entry/sequence order):
+ * <p>Given the record's PDFs (in ZIP entry/sequence order) the candidates are:
  * <ul>
- *   <li>exactly one PDF: that PDF is the candidate;</li>
- *   <li>two to ten PDFs: the first (lowest sequence number) whose basename ends in
- *       {@code LAPPe.pdf} (case-insensitive); none is selected if no filename
- *       matches;</li>
- *   <li>more than ten PDFs: the first PDF (lowest sequence number) is selected.</li>
+ *   <li>every PDF whose basename ends <em>case-sensitively</em> in
+ *       {@code LAPPe.pdf}, in sequence order; or</li>
+ *   <li>if no PDF matches, the first up to ten PDFs, in sequence order.</li>
  * </ul>
  *
- * <p>This class performs no I/O and owns no database, messaging, or HTTP
+ * <p>The caller processes the returned candidates <em>sequentially</em>,
+ * requesting only fields that are still unresolved, and stops once every field
+ * resolves. This class performs no I/O and owns no database, messaging, or HTTP
  * dependencies, so it can be unit-tested with ordinary inputs.
+ *
+ * <p>Matching is case-sensitive on the stored basename; the stored filename
+ * therefore preserves the original case (see
+ * {@code ArchiveExtractionService#lastSegment}).
  */
 public final class DocumentCandidateSelector {
 
-	private static final int MAX_PDFS_WITH_NAME_PREFERENCE = 10;
+	/** Fallback cap: when no {@code LAPPe.pdf} matches, at most this many PDFs become candidates. */
+	private static final int MAX_FALLBACK_CANDIDATES = 10;
 
-	private static final String LAPPE_SUFFIX = "lappe.pdf";
+	/** The exact, case-sensitive candidate basename suffix. */
+	private static final String LAPPE_SUFFIX = "LAPPe.pdf";
 
 	private DocumentCandidateSelector() {
 	}
 
 	/**
-	 * Selects the candidate document for structured field extraction.
+	 * Selects the candidate documents for structured field extraction.
 	 *
 	 * @param pdfs the record's PDFs (each snapshot carries id, sequence order,
 	 *        and stored filename); may be empty
-	 * @return the candidate document id, or empty when there are no PDFs (or no
-	 *         {@code LAPPe.pdf} match in the 2–10 range)
+	 * @return the candidates in sequence order: every case-sensitive
+	 *         {@code LAPPe.pdf} match, or (when there is no match) the first up
+	 *         to {@value #MAX_FALLBACK_CANDIDATES} PDFs; empty when there are no
+	 *         PDFs
 	 */
-	public static Optional<UUID> select(List<DocumentSnapshot> pdfs) {
+	public static List<DocumentSnapshot> select(List<DocumentSnapshot> pdfs) {
 		if (pdfs == null || pdfs.isEmpty()) {
-			return Optional.empty();
+			return List.of();
 		}
 		List<DocumentSnapshot> ordered =
 				pdfs.stream().sorted(Comparator.comparingInt(DocumentSnapshot::sequenceNumber)).toList();
-		int count = ordered.size();
-		if (count == 1) {
-			return Optional.of(ordered.get(0).documentId());
+		List<DocumentSnapshot> lappe = ordered.stream()
+				.filter(DocumentCandidateSelector::isLappe)
+				.toList();
+		if (!lappe.isEmpty()) {
+			return lappe;
 		}
-		if (count <= MAX_PDFS_WITH_NAME_PREFERENCE) {
-			return ordered.stream().filter(DocumentCandidateSelector::isLappe)
-					.map(DocumentSnapshot::documentId)
-					.findFirst();
-		}
-		return Optional.of(ordered.get(0).documentId());
+		return ordered.stream().limit(MAX_FALLBACK_CANDIDATES).toList();
 	}
 
 	private static boolean isLappe(DocumentSnapshot snapshot) {
@@ -63,7 +65,7 @@ public final class DocumentCandidateSelector {
 		}
 		int slash = filename.lastIndexOf('/');
 		String basename = slash >= 0 ? filename.substring(slash + 1) : filename;
-		return basename.toLowerCase(Locale.ROOT).endsWith(LAPPE_SUFFIX);
+		return basename.endsWith(LAPPE_SUFFIX);
 	}
 
 }

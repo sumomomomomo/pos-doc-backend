@@ -14,38 +14,7 @@ import horse.sumomo.pos_doc_backend.ocr.application.FieldAnswerParse.ParseKind;
  */
 class FieldAnswerParserTest {
 
-	// ---- normalize ----
-
-	@Test
-	void normalizeTrimsAndCollapsesWhitespace() {
-		assertEquals("Charlie Henry", FieldAnswerParser.normalize("   Charlie   Henry   "));
-		assertEquals("Charlie Henry", FieldAnswerParser.normalize("Charlie\n\n  Henry"));
-		assertEquals("Charlie Henry", FieldAnswerParser.normalize("Charlie\tHenry"));
-	}
-
-	@Test
-	void normalizeStripsWrappingQuotes() {
-		assertEquals("Charlie Henry", FieldAnswerParser.normalize("\"Charlie Henry\""));
-		assertEquals("Charlie Henry", FieldAnswerParser.normalize("'Charlie Henry'"));
-	}
-
-	@Test
-	void normalizeStripsLeadingQuoteOnly() {
-		assertEquals("Charlie Henry", FieldAnswerParser.normalize("\"Charlie Henry"));
-	}
-
-	@Test
-	void normalizeLeavesTrailingOnlyQuote() {
-		// Only leading or wrapping quotes are removed; a lone trailing quote is kept.
-		assertEquals("Charlie Henry\"", FieldAnswerParser.normalize("Charlie Henry\""));
-	}
-
-	@Test
-	void normalizeNullIsEmpty() {
-		assertEquals("", FieldAnswerParser.normalize(null));
-	}
-
-	// ---- names ----
+	// ---- valid names ----
 
 	@Test
 	void validNameIsResolved() {
@@ -62,6 +31,65 @@ class FieldAnswerParserTest {
 	}
 
 	@Test
+	void unicodeLettersAndHyphensAndApostrophesAreAccepted() {
+		assertEquals("José", FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "José").value());
+		assertEquals("Anne-Marie", FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "Anne-Marie").value());
+		assertEquals("O'Brien", FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "O'Brien").value());
+	}
+
+	@Test
+	void matchedWrappingQuotesAreRemoved() {
+		assertEquals("Charlie Henry", FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "\"Charlie Henry\"").value());
+		assertEquals("Charlie Henry", FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "'Charlie Henry'").value());
+	}
+
+	@Test
+	void trailingParenIdentificationNumberIsStripped() {
+		assertEquals("Charlie Henry",
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry (S1234567A)").value());
+	}
+
+	@Test
+	void trailingBracketIdentificationNumberIsStripped() {
+		assertEquals("Charlie Henry",
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry [S1234567A]").value());
+	}
+
+	@Test
+	void nameExactly256CharsIsResolved() {
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "a".repeat(256));
+		assertEquals(ParseKind.RESOLVED, p.kind());
+		assertEquals(256, p.value().length());
+	}
+
+	// ---- unresolved tokens ----
+
+	@Test
+	void unknownTokensAreUnknown() {
+		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "UNKNOWN").kind());
+		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "unknown").kind());
+		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "N/A").kind());
+		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "NONE").kind());
+		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "  unknown  ").kind());
+	}
+
+	@Test
+	void notFoundIsUnknownNotAName() {
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "NOT FOUND");
+		assertEquals(ParseKind.UNKNOWN, p.kind());
+		assertNull(p.value());
+	}
+
+	@Test
+	void unknownNameValueIsNull() {
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "UNKNOWN");
+		assertEquals(ParseKind.UNKNOWN, p.kind());
+		assertNull(p.value());
+	}
+
+	// ---- invalid names ----
+
+	@Test
 	void blankNameIsInvalid() {
 		assertEquals(ParseKind.INVALID, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "   ").kind());
 		assertEquals(ParseKind.INVALID, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, null).kind());
@@ -74,20 +102,21 @@ class FieldAnswerParserTest {
 	}
 
 	@Test
-	void nameExactly256CharsIsResolved() {
-		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "a".repeat(256));
-		assertEquals(ParseKind.RESOLVED, p.kind());
-		assertEquals(256, p.value().length());
+	void nameWithoutAnyLetterIsInvalid() {
+		assertEquals(ParseKind.INVALID, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "12345").kind());
+		assertEquals(ParseKind.INVALID, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "   ").kind());
 	}
 
 	@Test
-	void nameWithNulIsInvalid() {
+	void digitsInNameAreRejected() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry123").kind());
+	}
+
+	@Test
+	void controlCharactersAreRejected() {
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "John\u0000Doe").kind());
-	}
-
-	@Test
-	void nameWithControlCharacterIsInvalid() {
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "John\u0001Doe").kind());
 		assertEquals(ParseKind.INVALID,
@@ -95,19 +124,69 @@ class FieldAnswerParserTest {
 	}
 
 	@Test
-	void nameUnknownTokensAreUnknownNotInvalid() {
-		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "UNKNOWN").kind());
-		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Unknown").kind());
-		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "none").kind());
-		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "N/A").kind());
-		assertEquals(ParseKind.UNKNOWN, FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "  unknown  ").kind());
+	void newlineIsRejectedNotCollapsed() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry\nAdditional explanation...").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie\rHenry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie\n\nHenry").kind());
 	}
 
 	@Test
-	void unknownNameValueIsNull() {
-		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "UNKNOWN");
-		assertEquals(ParseKind.UNKNOWN, p.kind());
-		assertNull(p.value());
+	void unmatchedLeadingQuoteIsRejected() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "\"Charlie Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "'Charlie Henry").kind());
+	}
+
+	@Test
+	void backtickIsNotTreatedAsAQuote() {
+		// Backticks are not quote delimiters; the value keeps them and is rejected.
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "`Charlie Henry`").kind());
+	}
+
+	@Test
+	void fieldLabelIsRejected() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Policyowner Name: Charlie Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "Consultant: John Davidson").kind());
+	}
+
+	@Test
+	void listMarkerIsRejected() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "1. Charlie Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "2) Charlie Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "- Charlie Henry").kind());
+	}
+
+	@Test
+	void alternativeIsRejected() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry or Charles Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "John or Jane").kind());
+	}
+
+	@Test
+	void proseIsRejected() {
+		// A period is not a name character.
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Additional explanation...").kind());
+		// A full sentence (more than four words) is not a bare name.
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "The policyholder is Charlie Henry").kind());
+	}
+
+	@Test
+	void nullFieldIsRejected() {
+		assertThrows(IllegalArgumentException.class, () -> FieldAnswerParser.parse(null, "x"));
 	}
 
 	// ---- dates ----
@@ -134,10 +213,8 @@ class FieldAnswerParserTest {
 
 	@Test
 	void invalidCalendarDateIsRejected() {
-		// Feb 30 never exists.
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "30-Feb-2026").kind());
-		// Feb 29 in a non-leap year.
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "29-Feb-2025").kind());
 	}
@@ -155,11 +232,16 @@ class FieldAnswerParserTest {
 	}
 
 	@Test
-	void dateWithSurroundingWhitespaceIsAccepted() {
-		// Whitespace is trimmed during normalization, so " 26-Jul-2026 " is valid.
-		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, " 26-Jul-2026 ");
+	void quotedDateIsAccepted() {
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "\"26-Jul-2026\"");
 		assertEquals(ParseKind.RESOLVED, p.kind());
 		assertEquals("2026-07-26", p.value());
+	}
+
+	@Test
+	void dateWithNewlineIsRejected() {
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "26-Jul-2026\nextra").kind());
 	}
 
 	@Test
@@ -172,12 +254,7 @@ class FieldAnswerParserTest {
 		assertEquals(ParseKind.UNKNOWN,
 				FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "UNKNOWN").kind());
 		assertEquals(ParseKind.UNKNOWN,
-				FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "N/A").kind());
-	}
-
-	@Test
-	void nullFieldIsRejected() {
-		assertThrows(IllegalArgumentException.class, () -> FieldAnswerParser.parse(null, "x"));
+				FieldAnswerParser.parse(ExtractionField.POLICY_CREATE_DATE, "NOT FOUND").kind());
 	}
 
 }

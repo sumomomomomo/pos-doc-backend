@@ -2,6 +2,7 @@ package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -30,6 +31,7 @@ import org.springframework.test.context.DynamicPropertySource;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import okhttp3.OkHttpClient;
 
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
@@ -39,8 +41,14 @@ import org.testcontainers.utility.DockerImageName;
 import horse.sumomo.pos_doc_backend.ingestion.application.ExtractionBackoff;
 import horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
+import horse.sumomo.pos_doc_backend.ocr.api.LlamaCppOcrProperties;
 import horse.sumomo.pos_doc_backend.ocr.application.FieldExtractionPrompts;
+import horse.sumomo.pos_doc_backend.ocr.client.LlamaCppOcrClient;
+import horse.sumomo.pos_doc_backend.ocr.model.OcrResult;
+import horse.sumomo.pos_doc_backend.ocr.service.OcrException;
 import horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub;
+import horse.sumomo.pos_doc_backend.rendering.service.RenderingException;
+import horse.sumomo.pos_doc_backend.rendering.model.RenderedFirstPage;
 import horse.sumomo.pos_doc_backend.rendering.application.FirstPageRenderPreparationService;
 import horse.sumomo.pos_doc_backend.rendering.application.DocumentRenderSourceService;
 import horse.sumomo.pos_doc_backend.rendering.service.PdfFirstPageRenderer;
@@ -70,6 +78,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	private static MinIOContainer minio;
 	private static MinioClient adminClient;
 	private static OcrHttpStub ocrStub;
+	private static StubOcrClient stubOcrClient;
 
 	private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -281,7 +290,9 @@ class StructuredFieldExtractionServiceIntegrationTest {
 
 		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
 
-		// More than 10 PDFs: the first PDF (seq 0) is the candidate, not the LAPPe one (seq 10).
+		// More than 10 PDFs and no case-sensitive LAPPe.pdf: the fallback is the first 10.
+		// The first candidate (seq 0) resolves all fields; the rest are not needed; the
+		// lowercase "lappe.pdf" decoy (seq 10) is never a candidate.
 		assertEquals("COMPLETED", docStatus(s.documentIds().get(0)));
 		for (int i = 1; i < 11; i++) {
 			assertEquals("SKIPPED", docStatus(s.documentIds().get(i)));
@@ -290,25 +301,26 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	}
 
 	@Test
-	void twoToTenWithoutLappeSkipsAllAndMakesNoRequests() throws Exception {
+	void withoutLappeFallsBackToFirstPdfWhichIsProcessed() throws Exception {
+		// No case-sensitive LAPPe.pdf: the fallback selects the first up to 10 PDFs
+		// (all three here), and the first candidate is processed.
 		Setup s = createRecord(List.of("documents/a.pdf", "documents/b.pdf", "documents/c.pdf"), null, null, null);
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
 
-		int renderBefore = renderCount();
 		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
 
-		// No candidate -> 0 OCR requests, no render, all SKIPPED, record still completes.
-		assertEquals(0, ocrStub.getRequestCount());
-		assertEquals(0, renderCount() - renderBefore);
-		for (UUID docId : s.documentIds()) {
-			assertEquals("SKIPPED", docStatus(docId));
-		}
-		// Business fields remain null (best-effort).
-		assertEquals(null, this.jdbc.queryForObject("SELECT policyholder_name FROM pos_record WHERE id = ?",
-				String.class, s.recordId().toString()));
+		// The first candidate (seq 0) is processed (3 requests); the rest are not needed.
+		assertEquals(3, ocrStub.getRequestCount());
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(0)));
+		assertEquals("SKIPPED", docStatus(s.documentIds().get(1)));
+		assertEquals("SKIPPED", docStatus(s.documentIds().get(2)));
+		// Fields resolved from the first candidate.
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
 		assertEquals("COMPLETED", this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?",
 				String.class, s.jobId().toString()));
-		assertEquals("REVIEW_REQUIRED", this.jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?",
-				String.class, s.recordId().toString()));
 	}
 
 	@Test
@@ -421,6 +433,240 @@ class StructuredFieldExtractionServiceIntegrationTest {
 				String.class, s.documentIds().get(0).toString()));
 	}
 
+	// ---- case-sensitive candidate selection ----
+
+	@Test
+	void caseSensitiveLappeMatchIgnoresLowercaseVariant() throws Exception {
+		// Two basenames differ only by case. Only the exact "LAPPe.pdf" is a candidate.
+		Setup s = createRecord(List.of("documents/LAPPe.pdf", "documents/lappe.pdf"), null, null, null);
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		// Only the case-sensitive LAPPe.pdf (seq 0) is the candidate; the lowercase variant (seq 1) is not.
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(0)));
+		assertEquals("SKIPPED", docStatus(s.documentIds().get(1)));
+		assertEquals(3, ocrStub.getRequestCount());
+	}
+
+	@Test
+	void caseSensitiveLappeMatchIsPreferredEvenWhenOverTen() throws Exception {
+		// 11 PDFs with a case-sensitive LAPPe.pdf at seq 10: the match takes priority over the
+		// first-10 fallback, so only seq 10 is the candidate.
+		List<String> names = new ArrayList<>();
+		for (int i = 0; i < 11; i++) {
+			names.add(i == 10 ? "documents/LAPPe.pdf" : "documents/f" + i + ".pdf");
+		}
+		Setup s = createRecord(names, null, null, null);
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		// Only the LAPPe.pdf (seq 10) is the candidate; the other ten are not.
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(10)));
+		for (int i = 0; i < 10; i++) {
+			assertEquals("SKIPPED", docStatus(s.documentIds().get(i)));
+		}
+		assertEquals(3, ocrStub.getRequestCount());
+	}
+
+	// ---- multi-candidate sequential processing ----
+
+	@Test
+	void fieldsResolvingAcrossDifferentPdfs() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf", "documents/LAPPe.pdf"), null, null, null);
+		// The workflow processes every still-unresolved field for each candidate (the
+		// already-resolved set is fixed at the start of a candidate). Request order:
+		//   cand0: policyholder -> "Charlie Henry" (resolved); consultant -> "UNKNOWN"; date -> "UNKNOWN"
+		//   cand1 (policyholder already resolved, skipped): consultant -> "John Davidson";
+		//          date -> "26-Jul-2026" (resolved)
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("UNKNOWN", 200, "application/json");
+		ocrStub.enqueueResponse("UNKNOWN", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		assertEquals(5, ocrStub.getRequestCount());
+		// Both candidates contributed durable outcomes and are COMPLETED.
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(0)));
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(1)));
+		// Fields applied from the candidate that resolved them.
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("John Davidson", this.jdbc.queryForObject(
+				"SELECT consultant_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("2026-07-26", this.jdbc.queryForObject(
+				"SELECT policy_create_date FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("COMPLETED", this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?",
+				String.class, s.jobId().toString()));
+	}
+
+	@Test
+	void noCallsForAlreadyResolvedFields() throws Exception {
+		// All three business fields are already populated -> no OCR calls, no render.
+		Setup s = createRecord(List.of("documents/LAPPe.pdf", "documents/other.pdf"),
+				"Charlie Henry", "John Davidson", "2026-01-01");
+
+		int renderBefore = renderCount();
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		assertEquals(0, ocrStub.getRequestCount(), "all fields resolved -> no OCR requests");
+		assertEquals(0, renderCount() - renderBefore, "no render when all fields are resolved");
+		// The candidate has no durable outcomes -> SKIPPED; the other doc is SKIPPED too.
+		assertEquals("SKIPPED", docStatus(s.documentIds().get(0)));
+		assertEquals("SKIPPED", docStatus(s.documentIds().get(1)));
+		// Fields unchanged; job completes.
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("COMPLETED", this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?",
+				String.class, s.jobId().toString()));
+	}
+
+	@Test
+	void corruptCandidateThenUsableCandidateContinues() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf", "documents/LAPPe.pdf"), null, null, null);
+		// Simulate a permanent render failure for the first candidate.
+		((TestConfig.CountingRenderService) this.renderService).failDocument(s.documentIds().get(0),
+				RenderingException.Code.PDF_INVALID);
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		// First candidate FAILED (permanent render failure); the workflow continued to the second.
+		assertEquals("FAILED", docStatus(s.documentIds().get(0)));
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(1)));
+		// Fields resolved from the second candidate.
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("John Davidson", this.jdbc.queryForObject(
+				"SELECT consultant_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("2026-07-26", this.jdbc.queryForObject(
+				"SELECT policy_create_date FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		// Only the second candidate was rendered/processed: exactly 3 OCR requests.
+		assertEquals(3, ocrStub.getRequestCount());
+		// The job COMPLETES (it is not DLQ'd for a permanent candidate render failure).
+		assertEquals("COMPLETED", this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?",
+				String.class, s.jobId().toString()));
+	}
+
+	@Test
+	void upsertRaceReconcilesToDurableRow() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
+		// Pre-insert a durable RESOLVED outcome for the policyholder (as if a concurrent worker
+		// won the upsert). The record's policyholder is still null (unresolved).
+		UUID docId = s.documentIds().get(0);
+		this.jdbc.update(
+				"INSERT INTO pos_field_extraction (document_id, field_name, prompt_version, outcome, value_text, "
+					+ "model, finish_reason, attempt_count, completed_at_epoch_ms) VALUES (?,?,?,?,?,?,?,?,?)",
+				docId.toString(), "POLICYHOLDER_NAME", 2, "RESOLVED", "Durable Winner Value",
+				"/models/dotsmocr-1.8b-q8_0.gguf", "stop", 1, System.currentTimeMillis());
+		// The stub proposes a DIFFERENT value for the policyholder.
+		ocrStub.enqueueResponse("Contender Value", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		// The workflow must apply the DURABLE row's value, not the locally proposed value.
+		assertEquals("Durable Winner Value", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		// The outcome row still holds the durable winner's value (the upsert did not clobber it).
+		assertEquals("Durable Winner Value", this.jdbc.queryForObject(
+				"SELECT value_text FROM pos_field_extraction WHERE document_id = ? AND field_name = 'POLICYHOLDER_NAME'",
+				String.class, docId.toString()));
+	}
+
+	// ---- new retryable response codes (malformed / empty / truncated) ----
+
+	@Test
+	void malformedResponseIsRetryableThenSucceeds() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
+		ocrStub.enqueueRawResponse("not valid json {{{", 200, "application/json");
+		ocrStub.enqueueRawResponse("not valid json {{{", 200, "application/json");
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		assertEquals(3, ocrStub.getRequestCount(), "malformed responses are retried");
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+	}
+
+	@Test
+	void malformedResponseExhaustsRetriesAndFails() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
+		ocrStub.enqueueRawResponse("not valid json {{{", 200, "application/json");
+		ocrStub.enqueueRawResponse("not valid json {{{", 200, "application/json");
+		ocrStub.enqueueRawResponse("not valid json {{{", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		assertEquals(3, ocrStub.getRequestCount());
+		assertEquals("FAILED", this.jdbc.queryForObject(
+				"SELECT outcome FROM pos_field_extraction WHERE document_id = ? AND field_name = 'POLICYHOLDER_NAME'",
+				String.class, s.documentIds().get(0).toString()));
+	}
+
+	@Test
+	void emptyOutputIsRetryable() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
+		String emptyJson = "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":"
+				+ "\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}]}";
+		ocrStub.enqueueRawResponse(emptyJson, 200, "application/json");
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		assertEquals(2, ocrStub.getRequestCount(), "empty output is retried");
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+	}
+
+	@Test
+	void truncatedOutputIsRetryable() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
+		String truncatedJson = "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":"
+				+ "\"assistant\",\"content\":\"26-Jul-\"},\"finish_reason\":\"length\"}]}";
+		ocrStub.enqueueRawResponse(truncatedJson, 200, "application/json");
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		assertEquals(2, ocrStub.getRequestCount(), "truncated output is retried");
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+	}
+
+	// ---- interruption escaping ----
+
+	@Test
+	void interruptionEscapesRatherThanPersistingFailed() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, null, null);
+		// The OCR client reports an interruption; the workflow must let it escape (RabbitMQ retry)
+		// rather than persist a FAILED outcome.
+		stubOcrClient.nextException = new OcrException(OcrException.Code.OCR_INTERRUPTED);
+
+		ConsumerException ex = assertThrows(ConsumerException.class,
+				() -> this.workflow.runFieldExtraction(s.recordId(), s.jobId()));
+		Thread.interrupted(); // clear the interrupt flag set by the simulation
+
+		assertTrue(ex.getCode().retryable(), "an interruption must be retryable (escape to consumer retry)");
+		// No FAILED outcome was persisted.
+		assertEquals(0, this.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND outcome = 'FAILED'",
+				Integer.class, s.documentIds().get(0).toString()));
+		// The candidate is left in-flight (not marked FAILED or COMPLETED); the job is not completed.
+		assertEquals("PROCESSING", docStatus(s.documentIds().get(0)));
+		assertEquals("RUNNING", this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?",
+				String.class, s.jobId().toString()));
+	}
+
 	// ---- idempotent redelivery ----
 
 	@Test
@@ -514,21 +760,40 @@ class StructuredFieldExtractionServiceIntegrationTest {
 			};
 		}
 
+		@Bean
+		@Primary
+		LlamaCppOcrClient stubOcrClient(OkHttpClient ocrOkHttpClient, LlamaCppOcrProperties properties) {
+			StubOcrClient client = new StubOcrClient(ocrOkHttpClient, properties);
+			StructuredFieldExtractionServiceIntegrationTest.stubOcrClient = client;
+			return client;
+		}
+
 		/**
-		 * Delegates to the real PDFBox pipeline and counts {@code prepare} calls.
+		 * Delegates to the real PDFBox pipeline, counts {@code prepare} calls, and can be
+		 * configured to fail permanently for a specific document (simulating a corrupt PDF).
 		 */
 		static final class CountingRenderService extends FirstPageRenderPreparationService {
 
 			private int prepareCount;
+			private UUID failDocument;
+			private RenderingException.Code failCode;
 
 			CountingRenderService(DocumentRenderSourceService sourceService, StoredPdfMaterializer materializer,
 					PdfFirstPageRenderer renderer) {
 				super(sourceService, materializer, renderer);
 			}
 
+			void failDocument(UUID documentId, RenderingException.Code code) {
+				this.failDocument = documentId;
+				this.failCode = code;
+			}
+
 			@Override
-			public horse.sumomo.pos_doc_backend.rendering.model.RenderedFirstPage prepare(UUID documentId) {
+			public RenderedFirstPage prepare(UUID documentId) {
 				this.prepareCount++;
+				if (this.failDocument != null && this.failDocument.equals(documentId)) {
+					throw new RenderingException(this.failCode);
+				}
 				return super.prepare(documentId);
 			}
 
@@ -536,6 +801,34 @@ class StructuredFieldExtractionServiceIntegrationTest {
 				return this.prepareCount;
 			}
 
+		}
+
+	}
+
+	/**
+	 * OCR client test double that can be configured to throw a specific
+	 * {@link OcrException} on the next call (used to test interruption escaping).
+	 * Otherwise delegates to the real client logic.
+	 */
+	static final class StubOcrClient extends LlamaCppOcrClient {
+
+		volatile OcrException nextException;
+
+		StubOcrClient(OkHttpClient client, LlamaCppOcrProperties properties) {
+			super(client, properties);
+		}
+
+		@Override
+		public OcrResult recognize(RenderedFirstPage page, String prompt, int promptVersion) {
+			OcrException ex = this.nextException;
+			if (ex != null) {
+				this.nextException = null;
+				if (ex.getCode() == OcrException.Code.OCR_INTERRUPTED) {
+					Thread.currentThread().interrupt();
+				}
+				throw ex;
+			}
+			return super.recognize(page, prompt, promptVersion);
 		}
 
 	}

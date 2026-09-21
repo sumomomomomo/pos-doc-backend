@@ -155,6 +155,19 @@ public class FieldExtractionPersistenceService {
 	}
 
 	/**
+	 * Marks a candidate document {@code FAILED} (one transaction). Used when a
+	 * candidate's first page cannot be rendered for a permanent reason (corrupt,
+	 * encrypted, or otherwise invalid PDF); the workflow then moves on to the next
+	 * candidate.
+	 */
+	@Transactional
+	public void markDocumentFailed(UUID documentId) {
+		PosDocumentEntity document = this.requireDocument(documentId);
+		document.setProcessingStatus(DocumentProcessingStatus.FAILED);
+		this.documentRepository.saveAndFlush(document);
+	}
+
+	/**
 	 * Idempotently upserts a durable outcome row:
 	 * {@code INSERT ... ON CONFLICT(document_id, field_name, prompt_version) DO
 	 * NOTHING}, then re-reads. A pre-existing row is authoritative and returned;

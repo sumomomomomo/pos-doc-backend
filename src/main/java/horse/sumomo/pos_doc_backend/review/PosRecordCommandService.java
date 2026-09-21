@@ -250,8 +250,9 @@ public class PosRecordCommandService {
 			return false;
 		}
 		// Verification is blocked only while ingestion is still in progress. In the
-		// structured workflow the candidate ends COMPLETED and non-candidates end
-		// SKIPPED (both terminal), so SKIPPED documents must not block verification.
+		// structured workflow documents end in a terminal state (COMPLETED, FAILED for a
+		// candidate whose page could not be rendered, or SKIPPED), so none of these may
+		// block verification.
 		for (PosDocumentEntity document : documents) {
 			if (document.getProcessingStatus() == DocumentProcessingStatus.PENDING
 					|| document.getProcessingStatus() == DocumentProcessingStatus.PROCESSING) {

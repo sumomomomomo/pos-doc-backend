@@ -174,6 +174,12 @@ class IngestionConsumerIntegrationTest {
 				+ "created_at_epoch_ms, version) VALUES (?,?,?,?,?,?)", jobId.toString(),
 				posRecordId.toString(), "QUEUED", 0L, occurredAt.toEpochMilli(), 0L);
 
+		// Queue three valid field responses so the first candidate (selected via the
+		// no-LAPPe fallback) resolves every field and the workflow stops before the second PDF.
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
 		IngestionRequestedMessage message = new IngestionRequestedMessage(eventId, jobId, posRecordId, 1, occurredAt);
 		byte[] payload = this.json.writeValueAsBytes(message);
 		MessageProperties props = new MessageProperties();
@@ -202,8 +208,10 @@ class IngestionConsumerIntegrationTest {
 		assertEquals(0, ((Number) docs.get(0).get("sequence_number")).intValue());
 		assertEquals(1, ((Number) docs.get(1).get("sequence_number")).intValue());
 		assertEquals("UNKNOWN", docs.get(0).get("document_type"));
-		// No LAPPe.pdf in this archive -> no candidate, so the document is SKIPPED.
-		assertEquals("SKIPPED", docs.get(0).get("processing_status"));
+		// No LAPPe.pdf in this archive: the fallback selects the first up to 10 PDFs, so the
+		// first PDF (seq 0) is the candidate and is COMPLETED; the second is not needed.
+		assertEquals("COMPLETED", docs.get(0).get("processing_status"));
+		assertEquals("SKIPPED", docs.get(1).get("processing_status"));
 
 		String recordStatus = this.jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?", String.class,
 				posRecordId.toString());

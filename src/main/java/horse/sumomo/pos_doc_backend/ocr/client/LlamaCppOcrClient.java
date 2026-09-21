@@ -39,7 +39,7 @@ import okhttp3.ResponseBody;
  * <p>Never logs the request or response body. Exception messages contain no
  * PII, no raw response text, no URL, no headers.
  */
-public final class LlamaCppOcrClient {
+public class LlamaCppOcrClient {
 
 	private static final Logger log = LoggerFactory.getLogger(LlamaCppOcrClient.class);
 

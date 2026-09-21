@@ -241,6 +241,34 @@ class FieldExtractionPersistenceServiceTest {
 	}
 
 	@Test
+	void markDocumentFailedSetsTerminalFailedStatus() {
+		Setup s = setupRecord("PROCESSING", List.of("documents/LAPPe.pdf"), List.of("PROCESSING"), null, null, null);
+		UUID docId = s.documentIds().get(0);
+
+		persistenceService.markDocumentFailed(docId);
+
+		String status = jdbc.queryForObject("SELECT processing_status FROM pos_document WHERE id = ?", String.class,
+				docId.toString());
+		assertEquals("FAILED", status);
+	}
+
+	@Test
+	void completeWorkflowSucceedsWhenCandidateFailedAndOtherSkipped() {
+		// Candidate FAILED (permanent render failure), non-candidate SKIPPED -> all terminal.
+		Setup s = setupRecord("PROCESSING", List.of("documents/LAPPe.pdf", "documents/other.pdf"),
+				List.of("FAILED", "SKIPPED"), null, null, null);
+
+		persistenceService.completeWorkflow(s.jobId(), s.recordId(), NOW);
+
+		String jobStatus = jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
+				s.jobId().toString());
+		assertEquals("COMPLETED", jobStatus);
+		String recordStatus = jdbc.queryForObject("SELECT status FROM pos_record WHERE id = ?", String.class,
+				s.recordId().toString());
+		assertEquals("REVIEW_REQUIRED", recordStatus);
+	}
+
+	@Test
 	void completeWorkflowRefusesWhenADocumentIsPending() {
 		Setup s = setupRecord("PROCESSING", List.of("documents/LAPPe.pdf"), List.of("PENDING"), null, null, null);
 

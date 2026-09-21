@@ -37,11 +37,11 @@ public class OcrException extends RuntimeException {
 				"An OCR protocol error occurred (redirect, unexpected status, or invalid content type)."),
 		OCR_RESPONSE_TOO_LARGE("OCR_RESPONSE_TOO_LARGE", true,
 				"The OCR response exceeds the configured byte limit."),
-		OCR_RESPONSE_INVALID("OCR_RESPONSE_INVALID", false,
+		OCR_RESPONSE_INVALID("OCR_RESPONSE_INVALID", true,
 				"The OCR response is malformed or structurally invalid."),
-		OCR_OUTPUT_EMPTY("OCR_OUTPUT_EMPTY", false,
+		OCR_OUTPUT_EMPTY("OCR_OUTPUT_EMPTY", true,
 				"The OCR response contains no text."),
-		OCR_OUTPUT_TRUNCATED("OCR_OUTPUT_TRUNCATED", false,
+		OCR_OUTPUT_TRUNCATED("OCR_OUTPUT_TRUNCATED", true,
 				"The OCR output was truncated because the token limit was reached.");
 
 		private final String code;

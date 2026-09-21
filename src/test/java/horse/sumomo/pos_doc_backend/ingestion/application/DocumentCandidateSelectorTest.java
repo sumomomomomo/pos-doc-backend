@@ -1,11 +1,9 @@
 package horse.sumomo.pos_doc_backend.ingestion.application;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -15,145 +13,124 @@ import org.junit.jupiter.api.Test;
  */
 class DocumentCandidateSelectorTest {
 
-	private static final UUID DOC_A = UUID.fromString("11111111-1111-1111-1111-111111111111");
-	private static final UUID DOC_B = UUID.fromString("22222222-2222-2222-2222-222222222222");
-	private static final UUID DOC_C = UUID.fromString("33333333-3333-3333-3333-333333333333");
+	private static final UUID A = UUID.fromString("11111111-1111-1111-1111-111111111111");
+	private static final UUID B = UUID.fromString("22222222-2222-2222-2222-222222222222");
+	private static final UUID C = UUID.fromString("33333333-3333-3333-3333-333333333333");
 
 	private static DocumentSnapshot snap(int seq, String filename) {
 		return new DocumentSnapshot(UUID.randomUUID(), seq, filename);
 	}
 
-	@Test
-	void emptyListSelectsNone() {
-		assertFalse(DocumentCandidateSelector.select(List.of()).isPresent());
+	private static UUID id(DocumentSnapshot s) {
+		return s.documentId();
 	}
 
 	@Test
-	void nullListSelectsNone() {
-		assertFalse(DocumentCandidateSelector.select(null).isPresent());
+	void emptyListReturnsEmpty() {
+		assertEquals(List.of(), DocumentCandidateSelector.select(List.of()));
 	}
 
 	@Test
-	void singlePdfIsTheCandidateRegardlessOfName() {
-		// Even without a LAPPe.pdf name, a single PDF is the candidate.
-		DocumentSnapshot only = new DocumentSnapshot(DOC_A, 0, "documents/whatever.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(only));
-		assertTrue(result.isPresent());
-		assertEquals(DOC_A, result.orElseThrow());
+	void nullListReturnsEmpty() {
+		assertEquals(List.of(), DocumentCandidateSelector.select(null));
 	}
 
 	@Test
-	void singlePdfCandidateIsThatPdf() {
-		DocumentSnapshot only = new DocumentSnapshot(DOC_A, 0, "documents/whatever.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(only));
-		assertEquals(DOC_A, result.orElseThrow());
+	void caseSensitiveMatchSelectsLappePdf() {
+		// Only the exact "LAPPe.pdf" basename matches (case-sensitive).
+		DocumentSnapshot lappe = new DocumentSnapshot(A, 0, "documents/LAPPe.pdf");
+		DocumentSnapshot other = new DocumentSnapshot(B, 1, "documents/other.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(other, lappe));
+		assertEquals(List.of(lappe), result);
 	}
 
 	@Test
-	void twoToTenPicksFirstLappeInSequenceOrder() {
-		// DOC_A (seq 0) is not LAPPe, DOC_B (seq 1) is LAPPe -> DOC_B wins.
-		DocumentSnapshot a = new DocumentSnapshot(DOC_A, 0, "documents/other.pdf");
-		DocumentSnapshot b = new DocumentSnapshot(DOC_B, 1, "documents/LAPPe.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(a, b));
-		assertEquals(DOC_B, result.orElseThrow());
+	void wrongCaseDoesNotMatchAndFallsBack() {
+		// "lappe.pdf" / "LAPPE.pdf" do NOT match case-sensitively, so the selector
+		// falls back to the first (up to) ten PDFs.
+		DocumentSnapshot lower = new DocumentSnapshot(A, 0, "documents/lappe.pdf");
+		DocumentSnapshot upper = new DocumentSnapshot(B, 1, "documents/LAPPE.pdf");
+		DocumentSnapshot mixed = new DocumentSnapshot(C, 2, "documents/LaPpE.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(lower, upper, mixed));
+		// No case-sensitive match -> first up to 10, in sequence order.
+		assertEquals(List.of(lower, upper, mixed), result);
 	}
 
 	@Test
-	void firstLappeInSequenceOrderWinsWhenMultipleMatch() {
-		// Two LAPPe.pdf matches: the lower sequence number wins.
-		DocumentSnapshot a = new DocumentSnapshot(DOC_A, 0, "documents/alphaLAPPe.pdf");
-		DocumentSnapshot b = new DocumentSnapshot(DOC_B, 1, "documents/betaLAPPe.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(b, a)); // out of order input
-		assertEquals(DOC_A, result.orElseThrow());
+	void everyMatchingLappeIsSelectedInSequenceOrder() {
+		// Two case-sensitive matches: both are returned, in sequence order.
+		DocumentSnapshot first = new DocumentSnapshot(A, 0, "documents/alphaLAPPe.pdf");
+		DocumentSnapshot second = new DocumentSnapshot(B, 1, "documents/betaLAPPe.pdf");
+		DocumentSnapshot other = new DocumentSnapshot(C, 2, "documents/other.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(other, second, first));
+		assertEquals(List.of(first, second), result);
 	}
 
 	@Test
-	void matchingIsCaseInsensitive() {
-		DocumentSnapshot a = new DocumentSnapshot(DOC_A, 0, "documents/lappe.pdf");
-		DocumentSnapshot b = new DocumentSnapshot(DOC_B, 1, "documents/OTHER.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(a, b));
-		assertEquals(DOC_A, result.orElseThrow());
+	void noMatchFallsBackToFirstTenInSequenceOrder() {
+		List<DocumentSnapshot> pdfs = new java.util.ArrayList<>();
+		for (int i = 0; i < 12; i++) {
+			pdfs.add(snap(i, "documents/f" + i + ".pdf"));
+		}
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(pdfs);
+		// 12 PDFs, no LAPPe -> the first 10 in sequence order.
+		assertEquals(10, result.size());
+		assertEquals(0, result.get(0).sequenceNumber());
+		assertEquals(9, result.get(9).sequenceNumber());
 	}
 
 	@Test
-	void matchingUsesBasenameNotFullPath() {
-		// The match is on the basename (after the last '/'), not a substring of the path.
-		DocumentSnapshot a = new DocumentSnapshot(DOC_A, 0, "dir/documents/LAPPe.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(a,
-				new DocumentSnapshot(DOC_B, 1, "documents/other.pdf")));
-		assertEquals(DOC_A, result.orElseThrow());
+	void noMatchWithFewerThanTenSelectsAll() {
+		DocumentSnapshot a = snap(0, "documents/a.pdf");
+		DocumentSnapshot b = snap(1, "documents/b.pdf");
+		DocumentSnapshot c = snap(2, "documents/c.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(c, a, b));
+		// 3 PDFs, no LAPPe -> all 3, in sequence order.
+		assertEquals(List.of(a, b, c), result);
+	}
+
+	@Test
+	void exactlyTenWithoutLappeSelectsAllTen() {
+		List<DocumentSnapshot> pdfs = new java.util.ArrayList<>();
+		for (int i = 0; i < 10; i++) {
+			pdfs.add(snap(i, "documents/f" + i + ".pdf"));
+		}
+		assertEquals(10, DocumentCandidateSelector.select(pdfs).size());
+	}
+
+	@Test
+	void matchUsesBasenameNotFullPath() {
+		DocumentSnapshot deep = new DocumentSnapshot(A, 0, "dir/documents/LAPPe.pdf");
+		DocumentSnapshot other = new DocumentSnapshot(B, 1, "documents/other.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(deep, other));
+		assertEquals(List.of(deep), result);
 	}
 
 	@Test
 	void mustEndInLappePdfNotJustContainIt() {
-		// A file that contains "lappe.pdf" but does not END in it is not a match.
-		DocumentSnapshot a = new DocumentSnapshot(DOC_A, 0, "documents/LAPPe.pdf.txt");
-		DocumentSnapshot b = new DocumentSnapshot(DOC_B, 1, "documents/other.pdf");
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(a, b));
-		assertFalse(result.isPresent());
-	}
-
-	@Test
-	void twoToTenWithoutLappeSelectsNone() {
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(
-				snap(0, "documents/a.pdf"),
-				snap(1, "documents/b.pdf"),
-				snap(2, "documents/c.pdf")));
-		assertFalse(result.isPresent());
-	}
-
-	@Test
-	void exactlyTenWithoutLappeSelectsNone() {
-		List<DocumentSnapshot> pdfs = new java.util.ArrayList<>();
-		for (int i = 0; i < 10; i++) {
-			pdfs.add(snap(i, "documents/f" + i + ".pdf"));
-		}
-		assertFalse(DocumentCandidateSelector.select(pdfs).isPresent());
-	}
-
-	@Test
-	void exactlyTenWithLappePicksLappe() {
-		List<DocumentSnapshot> pdfs = new java.util.ArrayList<>();
-		for (int i = 0; i < 10; i++) {
-			pdfs.add(new DocumentSnapshot(UUID.randomUUID(), i,
-					i == 7 ? "documents/theLAPPe.pdf" : "documents/f" + i + ".pdf"));
-		}
-		Optional<UUID> result = DocumentCandidateSelector.select(pdfs);
-		assertTrue(result.isPresent());
-	}
-
-	@Test
-	void moreThanTenPicksFirstPdfInSequenceOrder() {
-		List<DocumentSnapshot> pdfs = new java.util.ArrayList<>();
-		// First in sequence order is DOC_C (seq 0); others follow. A LAPPe.pdf exists
-		// later but must be ignored because there are more than 10 PDFs.
-		pdfs.add(new DocumentSnapshot(DOC_C, 0, "documents/first.pdf"));
-		for (int i = 1; i < 11; i++) {
-			pdfs.add(new DocumentSnapshot(UUID.randomUUID(), i,
-					i == 10 ? "documents/lappe.pdf" : "documents/f" + i + ".pdf"));
-		}
-		assertEquals(11, pdfs.size());
-		Optional<UUID> result = DocumentCandidateSelector.select(pdfs);
-		assertEquals(DOC_C, result.orElseThrow());
-	}
-
-	@Test
-	void elevenWithoutLappeStillPicksFirstPdf() {
-		List<DocumentSnapshot> pdfs = new java.util.ArrayList<>();
-		pdfs.add(new DocumentSnapshot(DOC_C, 0, "documents/first.pdf"));
-		for (int i = 1; i < 11; i++) {
-			pdfs.add(snap(i, "documents/f" + i + ".pdf"));
-		}
-		Optional<UUID> result = DocumentCandidateSelector.select(pdfs);
-		assertEquals(DOC_C, result.orElseThrow());
+		// "LAPPe.pdf.txt" contains but does not END in "LAPPe.pdf" -> no match ->
+		// fallback (both selected).
+		DocumentSnapshot txt = new DocumentSnapshot(A, 0, "documents/LAPPe.pdf.txt");
+		DocumentSnapshot other = new DocumentSnapshot(B, 1, "documents/other.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(txt, other));
+		assertEquals(List.of(txt, other), result);
 	}
 
 	@Test
 	void nullFilenameIsNotTreatedAsLappe() {
-		Optional<UUID> result = DocumentCandidateSelector.select(List.of(
-				snap(0, null),
-				snap(1, "documents/other.pdf")));
-		assertFalse(result.isPresent());
+		DocumentSnapshot nullName = new DocumentSnapshot(A, 0, null);
+		DocumentSnapshot other = new DocumentSnapshot(B, 1, "documents/other.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(nullName, other));
+		// No case-sensitive match -> fallback (both, in sequence order).
+		assertEquals(List.of(nullName, other), result);
+	}
+
+	@Test
+	void singlePdfIsTheOnlyCandidate() {
+		DocumentSnapshot only = new DocumentSnapshot(A, 0, "documents/whatever.pdf");
+		List<DocumentSnapshot> result = DocumentCandidateSelector.select(List.of(only));
+		assertEquals(List.of(only), result);
+		assertEquals(A, id(result.get(0)));
 	}
 
 }
