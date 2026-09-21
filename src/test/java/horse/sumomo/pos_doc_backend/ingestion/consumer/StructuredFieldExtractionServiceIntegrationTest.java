@@ -39,6 +39,7 @@ import org.testcontainers.containers.MinIOContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import horse.sumomo.pos_doc_backend.ingestion.application.ExtractionBackoff;
+import horse.sumomo.pos_doc_backend.ingestion.application.ExtractionBackoffInterruptionException;
 import horse.sumomo.pos_doc_backend.ingestion.testsupport.SyntheticPdfFactory;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
 import horse.sumomo.pos_doc_backend.ocr.api.LlamaCppOcrProperties;
@@ -79,6 +80,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	private static MinioClient adminClient;
 	private static OcrHttpStub ocrStub;
 	private static StubOcrClient stubOcrClient;
+	private static volatile boolean backoffThrowsInterruption;
 
 	private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -667,6 +669,78 @@ class StructuredFieldExtractionServiceIntegrationTest {
 				String.class, s.jobId().toString()));
 	}
 
+	// ---- backoff interruption escaping ----
+
+	@Test
+	void interruptionDuringBackoffEscapesRatherThanDeadLettering() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
+		// A retryable OCR failure triggers an internal retry, which invokes the backoff;
+		// the backoff is interrupted and must escape through the consumer's retry path.
+		ocrStub.enqueueResponse("x", 503, "application/json");
+		backoffThrowsInterruption = true;
+		try {
+			ConsumerException ex = assertThrows(ConsumerException.class,
+					() -> this.workflow.runFieldExtraction(s.recordId(), s.jobId()));
+			assertTrue(ex.getCode().retryable(), "a backoff interruption must be retryable");
+		}
+		finally {
+			backoffThrowsInterruption = false;
+		}
+		assertTrue(Thread.interrupted(), "the interrupt flag must be preserved");
+		// No FAILED outcome was persisted; the candidate is left in-flight (not terminal).
+		assertEquals(0, this.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND outcome = 'FAILED'",
+				Integer.class, s.documentIds().get(0).toString()));
+		assertEquals("PROCESSING", docStatus(s.documentIds().get(0)));
+	}
+
+	// ---- redelivery must not re-render / demote a completed candidate ----
+
+	@Test
+	void completedCandidateWithDurableOutcomesIsNotRerenderedOnRedelivery() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, null, null);
+		// First run: every field is UNKNOWN (durable), the candidate is COMPLETED, job COMPLETED.
+		ocrStub.setNextResponse("UNKNOWN", 200, "application/json");
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(0)));
+		int rendersAfterFirst = renderCount();
+		int ocrAfterFirst = ocrStub.getRequestCount();
+		// Simulate a crash before the job was marked COMPLETED (the outcomes are committed).
+		this.jdbc.update("UPDATE ingestion_job SET status = 'RUNNING', completed_at_epoch_ms = NULL "
+				+ "WHERE id = ?", s.jobId().toString());
+		this.jdbc.update("UPDATE pos_record SET status = 'PROCESSING' WHERE id = ?", s.recordId().toString());
+		// Redelivery: the COMPLETED candidate has a durable outcome for every field, so it is
+		// reconciled and preserved (COMPLETED) without re-rendering or re-requesting.
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+		assertEquals(ocrAfterFirst, ocrStub.getRequestCount(), "no new OCR requests on redelivery");
+		assertEquals(rendersAfterFirst, renderCount(), "a COMPLETED candidate must not be re-rendered");
+		assertEquals("COMPLETED", docStatus(s.documentIds().get(0)), "the terminal state is preserved");
+		assertEquals("COMPLETED", this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?",
+				String.class, s.jobId().toString()));
+	}
+
+	@Test
+	void userUpdateBetweenFieldRequestsPreventsOcrCall() throws Exception {
+		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, null, null);
+		// While the policyholder request is in flight, a concurrent user fills the consultant
+		// field; the workflow's per-request refresh must prevent the consultant OCR call.
+		stubOcrClient.onFirstCall = () -> this.jdbc.update(
+				"UPDATE pos_record SET consultant_name = 'User Value' WHERE id = ?", s.recordId().toString());
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
+		this.workflow.runFieldExtraction(s.recordId(), s.jobId());
+
+		// Only the policyholder and date requests are made; the consultant is skipped.
+		assertEquals(2, ocrStub.getRequestCount(), "the consultant OCR call must be prevented");
+		assertEquals("Charlie Henry", this.jdbc.queryForObject(
+				"SELECT policyholder_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("User Value", this.jdbc.queryForObject(
+				"SELECT consultant_name FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+		assertEquals("2026-07-26", this.jdbc.queryForObject(
+				"SELECT policy_create_date FROM pos_record WHERE id = ?", String.class, s.recordId().toString()));
+	}
+
 	// ---- idempotent redelivery ----
 
 	@Test
@@ -756,6 +830,10 @@ class StructuredFieldExtractionServiceIntegrationTest {
 		@Primary
 		ExtractionBackoff noOpBackoff() {
 			return ms -> {
+				if (backoffThrowsInterruption) {
+					Thread.currentThread().interrupt();
+					throw new ExtractionBackoffInterruptionException(new InterruptedException("test interruption"));
+				}
 				// zero-time backoff for deterministic, fast tests
 			};
 		}
@@ -813,6 +891,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	static final class StubOcrClient extends LlamaCppOcrClient {
 
 		volatile OcrException nextException;
+		volatile Runnable onFirstCall;
 
 		StubOcrClient(OkHttpClient client, LlamaCppOcrProperties properties) {
 			super(client, properties);
@@ -827,6 +906,11 @@ class StructuredFieldExtractionServiceIntegrationTest {
 					Thread.currentThread().interrupt();
 				}
 				throw ex;
+			}
+			Runnable hook = this.onFirstCall;
+			if (hook != null) {
+				this.onFirstCall = null;
+				hook.run();
 			}
 			return super.recognize(page, prompt, promptVersion);
 		}

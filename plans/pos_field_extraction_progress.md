@@ -57,7 +57,20 @@ Branch: `task-pos-field-extraction` (base `main`)
 - [x] New/updated tests: multi-candidate sequential processing, case-sensitivity (exact match + >10 priority + lowercase decoy), corrupt-candidate→FAILED→continue, upsert-race reconciliation, malformed/empty/truncated retries, interruption escaping, `markDocumentFailed` + completion-with-FAILED, no-calls-when-resolved; parser test rewritten for strict validation.
 - [x] `PosRecordCommandService` comment updated (FAILED is a terminal state that does not block verification).
 - [x] README structured-field-extraction section rewritten for the multi-candidate + case-sensitive + render-failure semantics.
-- [x] Full suite: `./mvnw -o test` — **700 tests, 0 failures, 0 errors**.
+- [x] Full suite after round 1: `./mvnw -o test` — 700 tests, 0 failures, 0 errors.
+
+## ChatGPT review round 2 (PR #3 — 5 more blockers)
+- [x] **1. Backoff interruption** — `ExtractionBackoff.realTime()` now throws `ExtractionBackoffInterruptionException` (new); the workflow's `sleepUnlessLastAttempt` catches it and re-raises a retryable `ConsumerException(EXTRACTION_TRANSIENT_FAILURE)`, preserving the interrupt flag, so it flows through the consumer's retry / terminal-recovery path instead of dead-lettering without recovery.
+- [x] **2. `UNKNOWN (123)` never a name** — the policyholder's trailing ID is removed first, then blank/length/sentinel/label/ambiguity/name validation re-run on the result (ID removal applied only to `POLICYHOLDER_NAME`); `UNKNOWN (123)` is `UNKNOWN`, never a resolved name.
+- [x] **3. Name parsing** — removed the arbitrary four-word cap (legitimate long names accepted); added explicit field-label/prose-word detection (`name`, `policyholder`, `policyowner`, `consultant`, `submission`, `date`); trim leading/trailing whitespace (incl. a trailing newline) before the newline check so a trailing `\n` is valid while internal newlines stay invalid.
+- [x] **4. Redelivery must not re-render / demote a candidate** — `processCandidate` reconciles durable outcomes before rendering; if every currently-unresolved field already has a durable outcome it marks/preserves `COMPLETED` and continues without rendering; terminal states (COMPLETED/FAILED/SKIPPED) are never demoted; the business field is refreshed before each OCR request so a concurrent human update prevents the corresponding call.
+- [x] **5. `updatedAt` on field update** — `applyResolvedField` stamps `updatedAt` in the same transaction only when a null field is actually filled; a no-op (existing user value) changes neither timestamp nor version.
+- [x] New tests: backoff-interruption escaping, `UNKNOWN (123)` sentinel, trailing-newline trim, long names, label/prose-without-colon, redelivery no-re-render of a COMPLETED candidate, user-update-between-requests, timestamp/version-only-on-update, and a real-broker partial-recovery scenario (transient render failure on the second candidate; first candidate not re-rendered).
+
+## Final verification (consistent result)
+- [x] `./mvnw -o test` — **711 tests, 0 failures, 0 errors** (full suite, after round 2).
+- [x] `docker compose --env-file .env.example config --quiet` — OK.
+- [ ] `scripts/verify-container-stack.sh` — to re-run after corrections (needs the container stack + OCR stub).
 
 ## Deviations from spec
 - Kept `DocumentOcrPersistenceService` + its integration tests (historical, for the retained `document_ocr_result` table); it is no longer on the consumer path.

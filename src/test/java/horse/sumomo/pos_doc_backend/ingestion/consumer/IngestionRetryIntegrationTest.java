@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -57,6 +58,12 @@ import horse.sumomo.pos_doc_backend.ingestion.messaging.IngestionRequestedMessag
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioProperties;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.ObjectStorageException;
+import horse.sumomo.pos_doc_backend.rendering.application.DocumentRenderSourceService;
+import horse.sumomo.pos_doc_backend.rendering.application.FirstPageRenderPreparationService;
+import horse.sumomo.pos_doc_backend.rendering.model.RenderedFirstPage;
+import horse.sumomo.pos_doc_backend.rendering.service.PdfFirstPageRenderer;
+import horse.sumomo.pos_doc_backend.rendering.service.RenderingException;
+import horse.sumomo.pos_doc_backend.rendering.service.StoredPdfMaterializer;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -121,6 +128,18 @@ class IngestionRetryIntegrationTest {
 	 * {@code put} call until it reaches zero.
 	 */
 	static final AtomicInteger transientFailuresRemaining = new AtomicInteger();
+
+	/**
+	 * Render-failure injection: when {@link #renderFailFor} is non-null, the
+	 * {@link FailingRenderService} throws a retryable {@link RenderingException} on
+	 * the next {@link #renderFailuresRemaining} {@code prepare} calls for that
+	 * document, then delegates to the real renderer. {@link #renderCounts} records
+	 * how many times each document was rendered so tests can assert a completed
+	 * candidate is not re-rendered on a redelivery.
+	 */
+	static final AtomicReference<UUID> renderFailFor = new AtomicReference<>(null);
+	static final AtomicInteger renderFailuresRemaining = new AtomicInteger(0);
+	static final ConcurrentHashMap<UUID, Integer> renderCounts = new ConcurrentHashMap<>();
 
 	@Autowired
 	private RabbitTemplate rabbitTemplate;
@@ -459,7 +478,98 @@ class IngestionRetryIntegrationTest {
 				"no DLQ message expected");
 	}
 
+	@Test
+	@Order(6)
+	void renderFailureOnSecondCandidateRecoversAndFirstCandidateIsNotRerendered() throws Exception {
+		transientFailuresRemaining.set(0);
+		ocrStub.reset();
+		renderCounts.clear();
+
+		UUID posRecordId = UUID.randomUUID();
+		UUID jobId = UUID.randomUUID();
+		UUID eventId = UUID.randomUUID();
+		Instant occurredAt = Instant.parse("2026-01-02T03:04:05Z");
+		// Two candidates (same case-sensitive basename "LAPPe.pdf"); dirA = seq 0, dirB = seq 1.
+		prepareTwoLappeJob(posRecordId, jobId, occurredAt);
+		UUID candidateA = DocumentIdentityDeriver.deriveDocumentId(posRecordId, 0);
+		UUID candidateB = DocumentIdentityDeriver.deriveDocumentId(posRecordId, 1);
+		// Candidate B's render fails once (transient) on the first delivery, forcing a broker retry.
+		renderFailFor.set(candidateB);
+		renderFailuresRemaining.set(1);
+
+		// Candidate A resolves policyholder + consultant and leaves the date UNKNOWN (durable);
+		// candidate B resolves the date on the retry. Request order:
+		//   A: policyholder, consultant, date(UNKNOWN) ; B(retry): date.
+		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
+		ocrStub.enqueueResponse("John Davidson", 200, "application/json");
+		ocrStub.enqueueResponse("UNKNOWN", 200, "application/json");
+		ocrStub.enqueueResponse("26-Jul-2026", 200, "application/json");
+
+		long dlqBefore = queueDepth(this.rabbitTemplate, topology.deadLetterQueue());
+		send(jobId, posRecordId, eventId, occurredAt);
+
+		awaitTerminalJob(jobId);
+		assertEquals("COMPLETED", jobStatus(jobId),
+				"a transient render failure must be retried by the broker and recover");
+		assertEquals("COMPLETED", this.jdbc.queryForObject(
+				"SELECT processing_status FROM pos_document WHERE id = ?", String.class, candidateA.toString()));
+		assertEquals("COMPLETED", this.jdbc.queryForObject(
+				"SELECT processing_status FROM pos_document WHERE id = ?", String.class, candidateB.toString()));
+
+		// Candidate A was rendered exactly once and is NOT re-rendered on the retry, even
+		// though it left the date UNKNOWN (its decisions are durable).
+		assertEquals(1, renderCounts.getOrDefault(candidateA, 0),
+				"an already-completed candidate must not be re-rendered on redelivery");
+		assertEquals(2, renderCounts.getOrDefault(candidateB, 0),
+				"the second candidate is rendered, fails once, then succeeds on the retry");
+
+		// Every field resolved from the candidate that resolved it.
+		assertEquals("Charlie Henry", fieldValue(posRecordId, "policyholder_name"));
+		assertEquals("John Davidson", fieldValue(posRecordId, "consultant_name"));
+		assertEquals("2026-07-26", fieldValue(posRecordId, "policy_create_date"));
+
+		// Recovered, not dead-lettered.
+		assertEquals(dlqBefore, queueDepth(this.rabbitTemplate, topology.deadLetterQueue()),
+				"recovered messages must not reach the DLQ");
+
+		renderFailFor.set(null);
+		renderFailuresRemaining.set(0);
+	}
+
 	// --- helper methods --------------------------------------------------------
+
+	private String fieldValue(UUID posRecordId, String column) {
+		return this.jdbc.queryForObject("SELECT " + column + " FROM pos_record WHERE id = ?", String.class,
+				posRecordId.toString());
+	}
+
+	private void prepareTwoLappeJob(UUID posRecordId, UUID jobId, Instant occurredAt) throws Exception {
+		String objectKey = "archives/" + posRecordId + "/" + UUID.randomUUID() + ".zip";
+		// Two candidates with the same case-sensitive basename "LAPPe.pdf" in different
+		// directories; a LinkedHashMap keeps the ZIP entry (and thus sequence) order fixed.
+		Map<String, byte[]> entries = new java.util.LinkedHashMap<>();
+		entries.put("dirA/LAPPe.pdf", PDF_A);
+		entries.put("dirB/LAPPe.pdf", PDF_B);
+		byte[] zipBytes = zipBytes(entries);
+		adminClient.putObject(io.minio.PutObjectArgs.builder()
+				.bucket(TEST_BUCKET)
+				.object(objectKey)
+				.stream(new ByteArrayInputStream(zipBytes), (long) zipBytes.length, -1L)
+				.contentType("application/zip")
+				.build());
+		String sha256 = sha256Hex(zipBytes);
+		UUID storageObjectId = UUID.randomUUID();
+		this.jdbc.update("INSERT INTO storage_object (id, object_key, original_filename, content_type, "
+				+ "byte_size, sha256, created_at_epoch_ms) VALUES (?,?,?,?,?,?,?)", storageObjectId.toString(),
+				objectKey, "EREF-RETRY2.zip", "application/zip", zipBytes.length, sha256, occurredAt.toEpochMilli());
+		this.jdbc.update("INSERT INTO pos_record (id, source_archive_id, status, uploaded_by, "
+				+ "uploaded_at_epoch_ms, updated_at_epoch_ms, version) VALUES (?,?,?,?,?,?,?)",
+				posRecordId.toString(), storageObjectId.toString(), "UPLOADED", "test-uploader",
+				occurredAt.toEpochMilli(), occurredAt.toEpochMilli(), 0L);
+		this.jdbc.update("INSERT INTO ingestion_job (id, pos_record_id, status, attempt_count, "
+				+ "created_at_epoch_ms, version) VALUES (?,?,?,?,?,?)", jobId.toString(),
+				posRecordId.toString(), "QUEUED", 0L, occurredAt.toEpochMilli(), 0L);
+	}
 
 	private String jobStatus(UUID jobId) {
 		return this.jdbc.queryForObject("SELECT status FROM ingestion_job WHERE id = ?", String.class,
@@ -616,6 +726,39 @@ class IngestionRetryIntegrationTest {
 		MinioObjectStorage failingMinioObjectStorage(MinioClient client, MinioProperties properties) {
 			return new InterceptingMinioStorage(client, properties);
 		}
+
+		@Bean
+		@Primary
+		FirstPageRenderPreparationService failingRenderService(DocumentRenderSourceService sourceService,
+				StoredPdfMaterializer materializer, PdfFirstPageRenderer renderer) {
+			return new FailingRenderService(sourceService, materializer, renderer);
+		}
+	}
+
+	/**
+	 * Render wrapper that delegates to the real PDFBox pipeline, counts how many
+	 * times each document is rendered, and injects a deterministic number of
+	 * retryable render failures for a specific document (driven by the static
+	 * {@link #renderFailFor} / {@link #renderFailuresRemaining} fields).
+	 */
+	static final class FailingRenderService extends FirstPageRenderPreparationService {
+
+		FailingRenderService(DocumentRenderSourceService sourceService, StoredPdfMaterializer materializer,
+				PdfFirstPageRenderer renderer) {
+			super(sourceService, materializer, renderer);
+		}
+
+		@Override
+		public RenderedFirstPage prepare(UUID documentId) {
+			renderCounts.merge(documentId, 1, Integer::sum);
+			UUID failFor = renderFailFor.get();
+			if (failFor != null && failFor.equals(documentId)
+					&& renderFailuresRemaining.getAndUpdate(v -> v > 0 ? v - 1 : v) > 0) {
+				throw new RenderingException(RenderingException.Code.PDF_STORAGE_UNAVAILABLE);
+			}
+			return super.prepare(documentId);
+		}
+
 	}
 
 	/**

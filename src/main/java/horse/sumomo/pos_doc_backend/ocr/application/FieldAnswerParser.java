@@ -19,26 +19,28 @@ import horse.sumomo.pos_doc_backend.persistence.model.ExtractionField;
  *       {@code yyyy-MM-dd} date);</li>
  *   <li>{@code UNKNOWN} — the model answered an explicit unresolved token
  *       ({@code UNKNOWN}, {@code NOT FOUND}, {@code N/A}, ...); a valid
- *       unresolved result, not an error;</li>
- *   <li>{@code INVALID} — the answer is not a single clean value (multi-line, an
- *       unmatched quote, a field label, prose, a list marker, an "A or B"
- *       alternative, no letter, a disallowed character, ...). The workflow treats
- *       this as a failed attempt and retries.</li>
+ *       unresolved result, not an error; never stored as a business value;</li>
+ *   <li>{@code INVALID} — the answer is not a single clean value (an internal
+ *       newline, an unmatched quote, a field label, prose, a list marker, an
+ *       "A or B" alternative, no letter, a disallowed character, ...). The
+ *       workflow treats this as a failed attempt and retries.</li>
  * </ul>
  *
- * <p>Names must be a single line of letters, spaces, apostrophes and hyphens,
- * contain at least one Unicode letter, be at most 256 characters, and be at most
- * four words. A trailing bracketed identification number (e.g.
- * {@code (S1234567A)} or {@code [S1234567A]}) is stripped before validation.
- * Newlines are rejected (not collapsed). Only a matched pair of surrounding
- * quotes is removed; an unmatched quote is rejected. Backticks are not treated
- * as quotes.
+ * <p>Names must be a single line of letters, spaces, apostrophes and hyphens
+ * and contain at least one Unicode letter; there is no word-count cap (a
+ * legitimate multi-word name is accepted). Leading/trailing whitespace
+ * (including a trailing newline) is trimmed first; an <em>internal</em> newline
+ * remains invalid. For the policyholder only, a trailing bracketed
+ * identification number (e.g. {@code (S1234567A)} or {@code [S1234567A]}) is
+ * removed, and blank, sentinel, label, ambiguity, and name validation are then
+ * re-run on the trimmed result, so {@code "UNKNOWN (123)"} is an unresolved
+ * token, never a name. An answer that contains a field-label word (e.g.
+ * {@code name}, {@code policyowner}, {@code consultant}) or a colon is rejected
+ * as prose, not a bare name.
  */
 public final class FieldAnswerParser {
 
 	private static final int MAX_NAME_LENGTH = 256;
-
-	private static final int MAX_NAME_WORDS = 4;
 
 	/** Strict shape for the submission date: two-digit day, three-letter month, four-digit year. */
 	private static final Pattern DATE_PATTERN = Pattern.compile("^(\\d{2})-([A-Za-z]{3})-(\\d{4})$");
@@ -58,6 +60,14 @@ public final class FieldAnswerParser {
 			"UNKNOWN", "NOT FOUND", "N/A", "NONE", "NOT AVAILABLE", "NOT PROVIDED",
 			"NOT SPECIFIED", "UNSPECIFIED", "NOT APPLICABLE");
 
+	/**
+	 * Whole words that identify the answer as a field label or prose rather than a
+	 * bare name. A legitimate person's name never contains one of these as a
+	 * standalone word.
+	 */
+	private static final Set<String> NAME_LABEL_MARKERS = Set.of(
+			"name", "policyholder", "policyowner", "consultant", "submission", "date");
+
 	private FieldAnswerParser() {
 	}
 
@@ -75,12 +85,12 @@ public final class FieldAnswerParser {
 		if (raw == null) {
 			return FieldAnswerParse.invalid();
 		}
-		// A single clean value must not span multiple lines. Newlines/CR are
-		// rejected, not collapsed.
-		if (hasVerticalWhitespace(raw)) {
+		// Trim leading/trailing whitespace (including a trailing newline) first; an
+		// internal newline remains invalid.
+		String s = raw.trim();
+		if (hasVerticalWhitespace(s)) {
 			return FieldAnswerParse.invalid();
 		}
-		String s = raw.trim();
 		// Remove a matched pair of surrounding quotes; an unmatched opening quote
 		// is not silently dropped.
 		if (!s.isEmpty() && (s.charAt(0) == '"' || s.charAt(0) == '\'')) {
@@ -91,19 +101,27 @@ public final class FieldAnswerParser {
 		}
 		// Collapse horizontal whitespace (spaces, tabs) to single spaces.
 		s = s.replaceAll("[ \\t]+", " ");
-		if (s.isEmpty()) {
-			return FieldAnswerParse.invalid();
-		}
-		if (isUnknownToken(s)) {
-			return FieldAnswerParse.unknown();
-		}
 		if (field == ExtractionField.POLICY_CREATE_DATE) {
 			return parseDate(s);
 		}
-		return parseName(s);
+		// For the policyholder only, remove a trailing bracketed identification
+		// number, then re-run all validation (blank, sentinel, label, ambiguity,
+		// name) on the trimmed result.
+		if (field == ExtractionField.POLICYHOLDER_NAME) {
+			s = TRAILING_ID.matcher(s).replaceFirst("").trim();
+		}
+		return validateName(s);
 	}
 
-	private static FieldAnswerParse parseName(String s) {
+	private static FieldAnswerParse validateName(String s) {
+		if (s.isEmpty() || s.length() > MAX_NAME_LENGTH) {
+			return FieldAnswerParse.invalid();
+		}
+		// Unresolved sentinels are checked after any policyholder ID removal, so
+		// "UNKNOWN (123)" is a token, never a name.
+		if (isUnknownToken(s)) {
+			return FieldAnswerParse.unknown();
+		}
 		// A colon indicates a field label ("Name: ...") or prose, not a bare name.
 		if (s.indexOf(':') >= 0) {
 			return FieldAnswerParse.invalid();
@@ -114,12 +132,7 @@ public final class FieldAnswerParser {
 		if (ALTERNATIVE.matcher(s).find()) {
 			return FieldAnswerParse.invalid();
 		}
-		// Strip a trailing bracketed identification number before validating.
-		s = TRAILING_ID.matcher(s).replaceFirst("").trim();
-		if (s.isEmpty() || s.length() > MAX_NAME_LENGTH) {
-			return FieldAnswerParse.invalid();
-		}
-		if (s.split(" ").length > MAX_NAME_WORDS) {
+		if (containsNameLabel(s)) {
 			return FieldAnswerParse.invalid();
 		}
 		if (!containsUnicodeLetter(s) || !isNameLike(s)) {
@@ -129,6 +142,12 @@ public final class FieldAnswerParser {
 	}
 
 	private static FieldAnswerParse parseDate(String s) {
+		if (s.isEmpty()) {
+			return FieldAnswerParse.invalid();
+		}
+		if (isUnknownToken(s)) {
+			return FieldAnswerParse.unknown();
+		}
 		Matcher m = DATE_PATTERN.matcher(s);
 		if (!m.matches()) {
 			return FieldAnswerParse.invalid();
@@ -149,6 +168,15 @@ public final class FieldAnswerParser {
 
 	private static boolean isUnknownToken(String s) {
 		return UNKNOWN_TOKENS.contains(s.toUpperCase(Locale.ROOT));
+	}
+
+	private static boolean containsNameLabel(String s) {
+		for (String word : s.toLowerCase(Locale.ROOT).split(" ")) {
+			if (NAME_LABEL_MARKERS.contains(word)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static boolean hasVerticalWhitespace(String s) {

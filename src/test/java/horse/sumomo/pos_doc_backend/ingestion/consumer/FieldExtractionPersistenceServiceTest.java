@@ -196,6 +196,44 @@ class FieldExtractionPersistenceServiceTest {
 		assertEquals("2026-07-26", value);
 	}
 
+	@Test
+	void applyResolvedFieldBumpsTimestampAndVersionOnlyOnAnActualUpdate() throws Exception {
+		Setup s = setupRecord("PROCESSING", List.of("documents/LAPPe.pdf"), List.of("PROCESSING"), null, null, null);
+		Long beforeVersion = jdbc.queryForObject("SELECT version FROM pos_record WHERE id = ?", Long.class,
+				s.recordId().toString());
+		Long beforeUpdatedAt = jdbc.queryForObject("SELECT updated_at_epoch_ms FROM pos_record WHERE id = ?",
+				Long.class, s.recordId().toString());
+		Thread.sleep(10L); // ensure the stamp is observably later
+
+		persistenceService.applyResolvedField(s.recordId(), ExtractionField.POLICYHOLDER_NAME, "Charlie Henry");
+
+		Long afterVersion = jdbc.queryForObject("SELECT version FROM pos_record WHERE id = ?", Long.class,
+				s.recordId().toString());
+		Long afterUpdatedAt = jdbc.queryForObject("SELECT updated_at_epoch_ms FROM pos_record WHERE id = ?",
+				Long.class, s.recordId().toString());
+		assertEquals(beforeVersion + 1L, afterVersion, "an actual update must bump the version");
+		assertTrue(afterUpdatedAt > beforeUpdatedAt, "an actual update must bump updated_at");
+	}
+
+	@Test
+	void applyResolvedFieldNoopLeavesTimestampAndVersionUnchanged() {
+		Setup s = setupRecord("PROCESSING", List.of("documents/LAPPe.pdf"), List.of("PROCESSING"), "Existing", null,
+				null);
+		Long beforeVersion = jdbc.queryForObject("SELECT version FROM pos_record WHERE id = ?", Long.class,
+				s.recordId().toString());
+		Long beforeUpdatedAt = jdbc.queryForObject("SELECT updated_at_epoch_ms FROM pos_record WHERE id = ?",
+				Long.class, s.recordId().toString());
+
+		persistenceService.applyResolvedField(s.recordId(), ExtractionField.POLICYHOLDER_NAME, "New Value");
+
+		Long afterVersion = jdbc.queryForObject("SELECT version FROM pos_record WHERE id = ?", Long.class,
+				s.recordId().toString());
+		Long afterUpdatedAt = jdbc.queryForObject("SELECT updated_at_epoch_ms FROM pos_record WHERE id = ?",
+				Long.class, s.recordId().toString());
+		assertEquals(beforeVersion, afterVersion, "a no-op must not bump the version");
+		assertEquals(beforeUpdatedAt, afterUpdatedAt, "a no-op must not change updated_at");
+	}
+
 	// ---- resolvedBusinessFields ----
 
 	@Test

@@ -1,6 +1,8 @@
 package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Service;
 import horse.sumomo.pos_doc_backend.ingestion.application.DocumentCandidateSelector;
 import horse.sumomo.pos_doc_backend.ingestion.application.DocumentSnapshot;
 import horse.sumomo.pos_doc_backend.ingestion.application.ExtractionBackoff;
+import horse.sumomo.pos_doc_backend.ingestion.application.ExtractionBackoffInterruptionException;
 import horse.sumomo.pos_doc_backend.ocr.api.LlamaCppOcrProperties;
 import horse.sumomo.pos_doc_backend.ocr.application.FieldAnswerParse;
 import horse.sumomo.pos_doc_backend.ocr.application.FieldAnswerParser;
@@ -25,6 +28,7 @@ import horse.sumomo.pos_doc_backend.persistence.entity.PosFieldExtractionEntity;
 import horse.sumomo.pos_doc_backend.persistence.entity.PosFieldExtractionId;
 import horse.sumomo.pos_doc_backend.persistence.model.ExtractionField;
 import horse.sumomo.pos_doc_backend.persistence.model.ExtractionOutcome;
+import horse.sumomo.pos_doc_backend.persistence.model.DocumentProcessingStatus;
 import horse.sumomo.pos_doc_backend.rendering.application.FirstPageRenderPreparationService;
 import horse.sumomo.pos_doc_backend.rendering.model.RenderedFirstPage;
 import horse.sumomo.pos_doc_backend.rendering.service.RenderingException;
@@ -131,6 +135,46 @@ public class StructuredFieldExtractionService {
 	}
 
 	private void processCandidate(UUID posRecordId, UUID candidateId, int version) {
+		// Reconcile durable outcomes first (no model calls): apply any RESOLVED value
+		// and collect the fields that still need a model call (currently unresolved and
+		// with no durable outcome for this candidate).
+		Set<ExtractionField> unresolved = EnumSet.noneOf(ExtractionField.class);
+		unresolved.addAll(FIELD_ORDER);
+		unresolved.removeAll(this.persistence.resolvedBusinessFields(posRecordId));
+		List<ExtractionField> needModel = new ArrayList<>();
+		for (ExtractionField field : FIELD_ORDER) {
+			Optional<PosFieldExtractionEntity> existing = this.persistence.loadOutcome(candidateId, field, version);
+			existing.ifPresent(row -> this.applyIfResolved(posRecordId, field, row));
+			if (unresolved.contains(field) && existing.isEmpty()) {
+				needModel.add(field);
+			}
+		}
+
+		DocumentProcessingStatus status = this.persistence.documentStatus(candidateId);
+		boolean terminal = status == DocumentProcessingStatus.COMPLETED
+				|| status == DocumentProcessingStatus.FAILED
+				|| status == DocumentProcessingStatus.SKIPPED;
+
+		// Every field that needs work is already durable (or resolved): no render.
+		// Preserve any terminal state; otherwise (PENDING/PROCESSING crash recovery)
+		// mark COMPLETED so the candidate is not left in-flight.
+		if (needModel.isEmpty()) {
+			if (status == DocumentProcessingStatus.PENDING || status == DocumentProcessingStatus.PROCESSING) {
+				this.persistence.markDocumentCompleted(candidateId);
+			}
+			return;
+		}
+
+		// This candidate already finished (terminal) but a field is still unresolved with
+		// no durable outcome (e.g. a concurrent user cleared a field this candidate had
+		// resolved). Never demote or re-render a terminal candidate; a later candidate (if
+		// any) may resolve the remaining field.
+		if (terminal) {
+			log.debug("Candidate already terminal; not re-rendering; documentId={}", candidateId);
+			return;
+		}
+
+		// Not terminal: mark PROCESSING, render once, and request only the outstanding fields.
 		this.persistence.markDocumentProcessing(candidateId);
 		RenderedFirstPage page;
 		try {
@@ -138,9 +182,8 @@ public class StructuredFieldExtractionService {
 		}
 		catch (RenderingException ex) {
 			if (ex.getCode().retryable()) {
-				// Temporary storage/rendering failure, or an interruption: escape to
-				// the listener's bounded retry / DLQ path. An interruption preserves
-				// the interrupt flag.
+				// Temporary storage/rendering failure, or an interruption: escape to the
+				// listener's bounded retry / DLQ path. An interruption preserves the flag.
 				if (ex.getCode() == RenderingException.Code.RENDER_INTERRUPTED) {
 					Thread.currentThread().interrupt();
 				}
@@ -153,32 +196,30 @@ public class StructuredFieldExtractionService {
 			return;
 		}
 		try (page) {
-			Set<ExtractionField> alreadyResolved = this.persistence.resolvedBusinessFields(posRecordId);
-			for (ExtractionField field : FIELD_ORDER) {
-				if (alreadyResolved.contains(field)) {
+			for (ExtractionField field : needModel) {
+				// Refresh the business field before each request: a concurrent human
+				// update prevents the corresponding OCR call.
+				if (this.persistence.resolvedBusinessFields(posRecordId).contains(field)) {
 					continue;
 				}
-				this.processField(posRecordId, candidateId, field, version, page);
+				this.processFieldModelCall(posRecordId, candidateId, field, version, page);
 			}
 			this.persistence.markDocumentCompleted(candidateId);
 		}
 		log.debug("Candidate processed; documentId={}", candidateId);
 	}
 
-	private void processField(UUID posRecordId, UUID candidateId, ExtractionField field, int version,
+	private void processFieldModelCall(UUID posRecordId, UUID candidateId, ExtractionField field, int version,
 			RenderedFirstPage page) {
-		// A durable outcome for (candidate, field, version) is authoritative: no model
-		// call; apply only if the durable row is RESOLVED.
-		Optional<PosFieldExtractionEntity> existing = this.persistence.loadOutcome(candidateId, field, version);
-		if (existing.isPresent()) {
-			this.applyIfResolved(posRecordId, field, existing.get());
-			return;
-		}
-
 		String prompt = FieldExtractionPrompts.promptFor(field);
 		int maxAttempts = this.properties.maxAttempts();
 		String lastErrorCode = null;
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+			// Refresh the business field before each request: a concurrent human
+			// update prevents the corresponding OCR call.
+			if (this.persistence.resolvedBusinessFields(posRecordId).contains(field)) {
+				return;
+			}
 			OcrResult ocr;
 			FieldAnswerParse parse;
 			try {
@@ -250,7 +291,15 @@ public class StructuredFieldExtractionService {
 
 	private void sleepUnlessLastAttempt(int attempt, int maxAttempts) {
 		if (attempt < maxAttempts) {
-			this.backoff.sleep(this.properties.retryBackoffMs());
+			try {
+				this.backoff.sleep(this.properties.retryBackoffMs());
+			}
+			catch (ExtractionBackoffInterruptionException ex) {
+				// An interruption during the internal backoff must escape through the
+				// consumer's retry / terminal-recovery path (the interrupt flag is already
+				// restored by the backoff). It must not dead-letter without recovery.
+				throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, ex);
+			}
 		}
 	}
 

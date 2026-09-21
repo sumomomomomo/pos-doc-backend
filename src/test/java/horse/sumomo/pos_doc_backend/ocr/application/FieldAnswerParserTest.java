@@ -179,9 +179,60 @@ class FieldAnswerParserTest {
 		// A period is not a name character.
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Additional explanation...").kind());
-		// A full sentence (more than four words) is not a bare name.
+		// A label/prose answer (a field-label word) is not a bare name, even with no colon.
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "The policyholder is Charlie Henry").kind());
+	}
+
+	@Test
+	void labelProseWithoutColonIsRejected() {
+		// Short explanatory answers that contain only letters/spaces and no colon are
+		// still rejected because they carry a field-label word.
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "The name is Charlie").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Policyowner Name Charlie Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "Consultant John Davidson").kind());
+	}
+
+	@Test
+	void validNameLongerThanFourWordsIsResolved() {
+		// No word-count cap: a legitimate multi-word name is accepted.
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME,
+				"Mary Anne Patricia Rosemary Smith");
+		assertEquals(ParseKind.RESOLVED, p.kind());
+		assertEquals("Mary Anne Patricia Rosemary Smith", p.value());
+	}
+
+	@Test
+	void trailingNewlineIsTrimmedNotRejected() {
+		// Leading/trailing whitespace (including a trailing newline) is trimmed first;
+		// only an internal newline is invalid.
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry\n");
+		assertEquals(ParseKind.RESOLVED, p.kind());
+		assertEquals("Charlie Henry", p.value());
+		assertEquals("John Davidson",
+				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "  John Davidson  ").value());
+	}
+
+	@Test
+	void unknownWithTrailingIdIsUnknownNotAName() {
+		// The policyholder ID is removed first, then the sentinel is detected: the
+		// result is an unresolved token, never a resolved name.
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "UNKNOWN (123)");
+		assertEquals(ParseKind.UNKNOWN, p.kind());
+		assertNull(p.value());
+		assertEquals(ParseKind.UNKNOWN,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "NOT FOUND [S1234567A]").kind());
+		assertEquals(ParseKind.UNKNOWN,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "NONE (S1)").kind());
+	}
+
+	@Test
+	void policyholderIdStillStrippedForRealName() {
+		assertEquals("Charlie Henry",
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Charlie Henry (S1234567A)").value());
 	}
 
 	@Test

@@ -16,8 +16,9 @@ public interface ExtractionBackoff {
 
 	/**
 	 * A real-time sleeper backed by {@link Thread#sleep(long)}. Interrupts are
-	 * restored and surfaced as an unchecked exception so the workflow can treat
-	 * them as a cancellation.
+	 * restored and surfaced as an {@link ExtractionBackoffInterruptionException}
+	 * so the workflow can route them through the consumer's categorized
+	 * retry / terminal-recovery path (preserving the interrupt flag).
 	 */
 	static ExtractionBackoff realTime() {
 		return ms -> {
@@ -29,7 +30,7 @@ public interface ExtractionBackoff {
 			}
 			catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
-				throw new IllegalStateException("interruption during field-extraction backoff", e);
+				throw new ExtractionBackoffInterruptionException(e);
 			}
 		};
 	}

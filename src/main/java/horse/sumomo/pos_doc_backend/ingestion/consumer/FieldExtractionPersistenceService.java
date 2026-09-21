@@ -199,7 +199,9 @@ public class FieldExtractionPersistenceService {
 	 * Applies a resolved canonical value to the record's business field, updating
 	 * only when the field is currently null (one transaction). Uses the entity
 	 * setters (which normalize names) and the JPA {@code @Version} for optimistic
-	 * locking. A null field is left unchanged when a value is already present.
+	 * locking, and stamps {@code updatedAt} in the same transaction. A field that
+	 * already holds a value (e.g. a user edit) is left entirely unchanged: neither
+	 * the value, the timestamp, nor the version changes on a no-op.
 	 */
 	@Transactional
 	public void applyResolvedField(UUID posRecordId, ExtractionField field, String canonicalValue) {
@@ -208,22 +210,33 @@ public class FieldExtractionPersistenceService {
 			case POLICYHOLDER_NAME -> {
 				if (record.getPolicyholderName() == null) {
 					record.setPolicyholderName(canonicalValue);
+					record.setUpdatedAt(Instant.now());
 					this.recordRepository.saveAndFlush(record);
 				}
 			}
 			case CONSULTANT_NAME -> {
 				if (record.getConsultantName() == null) {
 					record.setConsultantName(canonicalValue);
+					record.setUpdatedAt(Instant.now());
 					this.recordRepository.saveAndFlush(record);
 				}
 			}
 			case POLICY_CREATE_DATE -> {
 				if (record.getPolicyCreateDate() == null) {
 					record.setPolicyCreateDate(LocalDate.parse(canonicalValue));
+					record.setUpdatedAt(Instant.now());
 					this.recordRepository.saveAndFlush(record);
 				}
 			}
 		}
+	}
+
+	/**
+	 * Returns the current processing status of a document (read-only transaction).
+	 */
+	@Transactional(readOnly = true)
+	public DocumentProcessingStatus documentStatus(UUID documentId) {
+		return this.requireDocument(documentId).getProcessingStatus();
 	}
 
 	/**

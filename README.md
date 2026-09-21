@@ -176,15 +176,24 @@ This replaces the old "OCR every PDF" workflow:
   persisted to `pos_field_extraction` as `RESOLVED` (with the validated value),
   `UNKNOWN` (absent/unreadable), or `FAILED` (a stable, PII-free error code).
   Only the value stored in the winning (authoritative) upsert row is applied to
-  the record. Values are canonicalized (a name must be a short run of letters,
-  spaces, apostrophes, and hyphens; the submission date `dd-MMM-yyyy` is
-  validated and stored as ISO `yyyy-MM-dd`).
+  the record. Values are canonicalized: a name must be a single line of letters,
+  spaces, apostrophes, and hyphens (no word-count cap, but field labels / prose
+  words such as `name` or `policyowner` are rejected), and the policyholder's
+  trailing bracketed ID is stripped before validation (so `UNKNOWN (123)` is an
+  unresolved token, never a name); the submission date `dd-MMM-yyyy` is
+  validated and stored as ISO `yyyy-MM-dd`.
 - **Render failure** — a permanent render failure for a candidate (corrupt,
   encrypted, or otherwise invalid PDF) marks that candidate `FAILED` and the
   workflow moves on to the next candidate (best-effort; the job still completes).
   A temporary storage/rendering failure, and any interruption, escape to the
   consumer's bounded retry / DLQ path (an interruption is never persisted as a
   `FAILED` outcome).
+- **Idempotent redelivery** — on a redelivery the workflow reconciles each
+  candidate's durable outcomes before rendering. A candidate whose decisions are
+  all durable is preserved (`COMPLETED`) and is **not** re-rendered or re-requested;
+  terminal states (`COMPLETED`/`FAILED`/`SKIPPED`) are never demoted. A business
+  field is re-checked before each OCR request, so a concurrent human edit prevents
+  the corresponding call.
 - **Best-effort** — a field that is `UNKNOWN` or `FAILED` leaves the record's
   business field `NULL`; it does **not** fail the job. The record always ends
   `REVIEW_REQUIRED` (human review is still required).
