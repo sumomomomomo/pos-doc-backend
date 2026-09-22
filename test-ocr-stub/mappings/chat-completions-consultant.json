@@ -8,6 +8,42 @@
           "expression": "$.messages[0].content[1].text",
           "equalTo": "Return only the Financial Consultant Name shown in brackets in this document. Do not include brackets, labels, identification numbers, or any other text. Example output: John Davidson. If the field is absent, unreadable, or ambiguous, return exactly UNKNOWN."
         }
+      },
+      {
+        "matchesJsonPath": {
+          "expression": "$.temperature",
+          "equalTo": "0.7"
+        }
+      },
+      {
+        "matchesJsonPath": {
+          "expression": "$.top_p",
+          "equalTo": "0.8"
+        }
+      },
+      {
+        "matchesJsonPath": {
+          "expression": "$.top_k",
+          "equalTo": "20"
+        }
+      },
+      {
+        "matchesJsonPath": {
+          "expression": "$.min_p",
+          "equalTo": "0.0"
+        }
+      },
+      {
+        "matchesJsonPath": {
+          "expression": "$.presence_penalty",
+          "equalTo": "1.5"
+        }
+      },
+      {
+        "matchesJsonPath": {
+          "expression": "$.repeat_penalty",
+          "equalTo": "1.0"
+        }
       }
     ]
   },
@@ -16,6 +52,6 @@
     "headers": {
       "Content-Type": "application/json"
     },
-    "body": "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"John Davidson\"},\"finish_reason\":\"stop\"}]}"
+    "body": "{\"model\":\"task12-test-model\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"John Davidson\"},\"finish_reason\":\"stop\"}]}"
   }
 }

@@ -36,7 +36,7 @@ import horse.sumomo.pos_doc_backend.persistence.model.ExtractionOutcome;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class FieldExtractionPersistenceServiceTest {
 
-	private static final String MODEL = "/models/dotsmocr-1.8b-q8_0.gguf";
+	private static final String MODEL = "task12-test-model";
 	private static final Instant NOW = Instant.parse("2026-01-02T03:04:05Z");
 
 	@Autowired
@@ -103,17 +103,17 @@ class FieldExtractionPersistenceServiceTest {
 	}
 
 	private PosFieldExtractionEntity resolved(UUID docId, ExtractionField field, String value, int attempts) {
-		return new PosFieldExtractionEntity(new PosFieldExtractionId(docId, field.name(), 2),
+		return new PosFieldExtractionEntity(new PosFieldExtractionId(docId, field.name(), 3),
 				ExtractionOutcome.RESOLVED, value, MODEL, "stop", attempts, null, NOW);
 	}
 
 	private PosFieldExtractionEntity unknown(UUID docId, ExtractionField field, int attempts) {
-		return new PosFieldExtractionEntity(new PosFieldExtractionId(docId, field.name(), 2),
+		return new PosFieldExtractionEntity(new PosFieldExtractionId(docId, field.name(), 3),
 				ExtractionOutcome.UNKNOWN, null, MODEL, "stop", attempts, null, NOW);
 	}
 
 	private PosFieldExtractionEntity failed(UUID docId, ExtractionField field, String errorCode, int attempts) {
-		return new PosFieldExtractionEntity(new PosFieldExtractionId(docId, field.name(), 2),
+		return new PosFieldExtractionEntity(new PosFieldExtractionId(docId, field.name(), 3),
 				ExtractionOutcome.FAILED, null, MODEL, null, attempts, errorCode, NOW);
 	}
 
@@ -135,7 +135,7 @@ class FieldExtractionPersistenceServiceTest {
 
 		Integer count = jdbc.queryForObject(
 				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND field_name = ? "
-						+ "AND prompt_version = 2",
+						+ "AND prompt_version = 3",
 				Integer.class, docId.toString(), "POLICYHOLDER_NAME");
 		assertEquals(1, count);
 	}

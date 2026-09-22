@@ -54,6 +54,15 @@ MINIO_BUCKET="pos-documents-test"
 RABBITMQ_USERNAME="task45-test-rabbit"
 RABBITMQ_PASSWORD="task45-test-rabbit-secret-change-me"
 
+# --- OCR (llama.cpp / Qwen 3.5 8B) isolated test values ------------------------
+# Point the backend at the WireMock OCR stub and use an explicit synthetic model
+# ID. The stub returns this exact model ID in every response, and the request-body
+# mappings require the full Qwen sampling contract. Provided via the temp env file
+# so the base compose.yaml's `OCR_MODEL: ${OCR_MODEL:?OCR_MODEL is required}` is
+# satisfied without depending on the operator's shell environment or .env.
+OCR_SERVER_ORIGIN="http://ocr-stub:8080"
+OCR_MODEL="task12-test-model"
+
 # --- security (stack-test mode) ----------------------------------------------
 #
 # The whole-stack verifier runs the backend in the isolated, fail-closed
@@ -96,6 +105,8 @@ MINIO_BUCKET=${MINIO_BUCKET}
 RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
 RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
 INGESTION_CONSUMER_ENABLED=false
+OCR_SERVER_ORIGIN=${OCR_SERVER_ORIGIN}
+OCR_MODEL=${OCR_MODEL}
 ${SECURITY_ENV}
 EOF
 
@@ -571,6 +582,8 @@ MINIO_BUCKET=${MINIO_BUCKET}
 RABBITMQ_USERNAME=${RABBITMQ_USERNAME}
 RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
 INGESTION_CONSUMER_ENABLED=true
+OCR_SERVER_ORIGIN=${OCR_SERVER_ORIGIN}
+OCR_MODEL=${OCR_MODEL}
 ${SECURITY_ENV}
 EOF
 docker compose --env-file "${ENV_FILE}" -p "${STACK_ID}" -f compose.yaml -f compose.dev.yaml -f compose.test-ocr.yaml up --detach --wait backend >/dev/null
@@ -765,9 +778,9 @@ fi
 echo "wiremock: exactly 3 OCR requests recorded (one per field)"
 
 echo "== structured field outcomes in SQLite =="
-FIELD_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM pos_field_extraction WHERE prompt_version = 2;")"
+FIELD_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM pos_field_extraction WHERE prompt_version = 3;")"
 if [ "${FIELD_RESULT_COUNT}" != "3" ]; then
-    echo "ERROR: expected 3 version-2 field outcomes, got ${FIELD_RESULT_COUNT}." >&2
+    echo "ERROR: expected 3 version-3 field outcomes, got ${FIELD_RESULT_COUNT}." >&2
     exit 1
 fi
 FIELD_RESOLVED="$(sqlite_query "SELECT count(*) FROM pos_field_extraction WHERE outcome = 'RESOLVED';")"
@@ -775,7 +788,7 @@ if [ "${FIELD_RESOLVED}" != "3" ]; then
     echo "ERROR: expected 3 RESOLVED field outcomes, got ${FIELD_RESOLVED}." >&2
     exit 1
 fi
-echo "sqlite: 3 version-2 field outcomes present (all RESOLVED)"
+echo "sqlite: 3 version-3 field outcomes present (all RESOLVED)"
 
 echo "== field values are the deterministic stub values =="
 PH_VALUE="$(sqlite_query "SELECT value_text FROM pos_field_extraction WHERE field_name = 'POLICYHOLDER_NAME';")"

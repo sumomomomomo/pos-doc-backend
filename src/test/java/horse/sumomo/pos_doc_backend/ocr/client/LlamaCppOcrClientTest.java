@@ -57,7 +57,7 @@ import okhttp3.OkHttpClient;
  */
 class LlamaCppOcrClientTest {
 
-	private static final String MODEL = "/models/dotsmocr-1.8b-q8_0.gguf";
+	private static final String MODEL = "task12-test-model";
 	private static final String PROMPT = "Extract the text content from this image.";
 	private static final String SYNTHETIC_OCR_TEXT = "synthetic-ocr-text-for-testing";
 	private static final long MAX_CAPTURE_BYTES = 10 * 1024 * 1024; // 10 MiB cap
@@ -457,7 +457,7 @@ class LlamaCppOcrClientTest {
 		LlamaCppOcrProperties props = new LlamaCppOcrProperties(
 				"http://127.0.0.1:" + this.port, "/v1/chat/completions", MODEL,
 				Duration.ofSeconds(5), Duration.ofSeconds(300), Duration.ofSeconds(310),
-				33554432L, this.maxResponseBytes, 1000, 4096, 0.1, 0.9, 1, 3, 0);
+				33554432L, this.maxResponseBytes, 1000, 4096, 0.1, 0.9, 20, 0.0, 1.5, 1.0, 1, 3, 0);
 		OkHttpClient httpClient = new OkHttpClient.Builder()
 				.connectTimeout(Duration.ofMillis(5000))
 				.readTimeout(Duration.ofMillis(300000))
@@ -1021,7 +1021,7 @@ class LlamaCppOcrClientTest {
 		LlamaCppOcrProperties props = new LlamaCppOcrProperties(
 				"http://127.0.0.1:" + port, "/v1/chat/completions", MODEL,
 				Duration.ofSeconds(5), Duration.ofSeconds(300), Duration.ofSeconds(310),
-				33554432L, this.maxResponseBytes, 1000000, 4096, 0.1, 0.9, 1, 3, 0);
+				33554432L, this.maxResponseBytes, 1000000, 4096, 0.1, 0.9, 20, 0.0, 1.5, 1.0, 1, 3, 0);
 		OkHttpClient httpClient = new OkHttpClient.Builder()
 				.connectTimeout(Duration.ofMillis(5000))
 				.readTimeout(Duration.ofMillis(300000))

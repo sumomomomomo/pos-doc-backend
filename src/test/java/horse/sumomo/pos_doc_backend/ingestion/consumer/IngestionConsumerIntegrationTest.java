@@ -123,6 +123,8 @@ class IngestionConsumerIntegrationTest {
 		registry.add("spring.rabbitmq.password", rabbit::getAdminPassword);
 
 		registry.add("app.ocr.llama-cpp.server-origin", ocrStub::getServerOrigin);
+		registry.add("app.ocr.llama-cpp.model",
+				() -> horse.sumomo.pos_doc_backend.ocr.testsupport.OcrHttpStub.MODEL);
 
 		Path sqliteDbFile = Files.createTempFile("pos-doc-consumer-test", ".db");
 		sqliteDbFile.toFile().deleteOnExit();

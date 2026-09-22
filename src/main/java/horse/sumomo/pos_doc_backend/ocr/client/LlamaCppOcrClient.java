@@ -104,7 +104,10 @@ public class LlamaCppOcrClient {
 			StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 					page.pngPath(), page.pngByteSize(), this.properties.maxImageBytes(),
 					this.properties.model(), prompt, this.properties.maxTokens(),
-					this.properties.temperature(), this.properties.topP(), this.objectMapper);
+					this.properties.temperature(), this.properties.topP(),
+					this.properties.topK(), this.properties.minP(),
+					this.properties.presencePenalty(), this.properties.repeatPenalty(),
+					this.objectMapper);
 
 			Request request = new Request.Builder()
 					.url(this.buildUrl())
