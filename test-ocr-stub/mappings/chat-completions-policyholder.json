@@ -1,0 +1,21 @@
+{
+  "request": {
+    "method": "POST",
+    "urlPath": "/v1/chat/completions",
+    "bodyPatterns": [
+      {
+        "matchesJsonPath": {
+          "expression": "$.messages[0].content[1].text",
+          "equalTo": "Return only the value of the Policyowner Name shown in this document. Exclude any bracketed identification number that follows the name. Example output: Charlie Henry. If the field is absent, unreadable, or ambiguous, return exactly UNKNOWN."
+        }
+      }
+    ]
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Charlie Henry\"},\"finish_reason\":\"stop\"}]}"
+  }
+}

@@ -40,7 +40,7 @@ public class IngestionConsumerService {
 	private final SourceArchiveDownloader downloader;
 	private final ArchiveExtractionService extractor;
 	private final ExtractionPersistenceService persistenceService;
-	private final DocumentOcrWorkflowService ocrWorkflowService;
+	private final StructuredFieldExtractionService fieldExtractionService;
 
 	private final IngestionConsumerService self;
 
@@ -49,7 +49,7 @@ public class IngestionConsumerService {
 			PosRecordRepository recordRepository, StorageObjectRepository storageObjectRepository,
 			SourceArchiveDownloader downloader, ArchiveExtractionService extractor,
 			ExtractionPersistenceService persistenceService,
-			DocumentOcrWorkflowService ocrWorkflowService) {
+			StructuredFieldExtractionService fieldExtractionService) {
 		this.self = self;
 		this.jobRepository = Objects.requireNonNull(jobRepository);
 		this.recordRepository = Objects.requireNonNull(recordRepository);
@@ -57,7 +57,7 @@ public class IngestionConsumerService {
 		this.downloader = Objects.requireNonNull(downloader);
 		this.extractor = Objects.requireNonNull(extractor);
 		this.persistenceService = Objects.requireNonNull(persistenceService);
-		this.ocrWorkflowService = Objects.requireNonNull(ocrWorkflowService);
+		this.fieldExtractionService = Objects.requireNonNull(fieldExtractionService);
 	}
 
 	/**
@@ -153,11 +153,11 @@ public class IngestionConsumerService {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
 		}
 
-		// Task 9: run the OCR workflow after extraction. This calls
-		// FirstPageOcrService for every document, persists a version-1
-		// OCR result for each, then completes the job and moves the POS
-		// record to REVIEW_REQUIRED.
-		this.ocrWorkflowService.runOcrWorkflow(posRecordId, claim.jobId());
+		// Run the structured field-extraction workflow after extraction. It
+		// selects one candidate document, extracts the three business fields
+		// best-effort, marks the rest SKIPPED, then completes the job and moves
+		// the POS record to REVIEW_REQUIRED.
+		this.fieldExtractionService.runFieldExtraction(posRecordId, claim.jobId());
 	}
 
 	@Transactional(readOnly = true)

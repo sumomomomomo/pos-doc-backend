@@ -27,22 +27,21 @@ import okhttp3.ResponseBody;
 
 /**
  * Typed llama.cpp HTTP client that sends a single first-page PNG to the
- * fixed local OCR service and returns an immutable {@link OcrResult}.
+ * fixed local OCR service with one caller-supplied prompt and returns an
+ * immutable {@link OcrResult}.
  *
  * <p>Permits exactly one OCR request at a time inside one backend instance,
- * using a fair semaphore. Does not retry; a later queue workflow owns retry
- * policy.
+ * using a fair semaphore. Does not retry; the caller (the structured field
+ * extraction workflow) owns retry policy. The prompt and prompt version are
+ * supplied by the caller; this client owns HTTP transport and response
+ * validation only and never owns a field prompt.
  *
  * <p>Never logs the request or response body. Exception messages contain no
  * PII, no raw response text, no URL, no headers.
  */
-public final class LlamaCppOcrClient {
+public class LlamaCppOcrClient {
 
 	private static final Logger log = LoggerFactory.getLogger(LlamaCppOcrClient.class);
-
-	private static final int PROMPT_VERSION = 1;
-
-	private static final String PROMPT = "Extract the text content from this image.";
 
 	private final OkHttpClient httpClient;
 	private final LlamaCppOcrProperties properties;
@@ -67,16 +66,24 @@ public final class LlamaCppOcrClient {
 	}
 
 	/**
-	 * Sends the rendered first-page PNG to the llama.cpp service and returns
-	 * the recognized text.
+	 * Sends the rendered first-page PNG to the llama.cpp service with the given
+	 * prompt and returns the recognized text.
 	 *
 	 * @param page the rendered first-page handle; must not be null
+	 * @param prompt the exact field prompt to send; must not be blank
+	 * @param promptVersion the structured prompt version; must be &gt; 0
 	 * @return an immutable {@link OcrResult}
 	 * @throws OcrException with a stable code on any failure
 	 */
-	public OcrResult recognize(RenderedFirstPage page) {
+	public OcrResult recognize(RenderedFirstPage page, String prompt, int promptVersion) {
 		if (page == null) {
 			throw new IllegalArgumentException("page must not be null");
+		}
+		if (prompt == null || prompt.isBlank()) {
+			throw new IllegalArgumentException("prompt must not be blank");
+		}
+		if (promptVersion <= 0) {
+			throw new IllegalArgumentException("promptVersion must be > 0");
 		}
 
 		boolean acquired = false;
@@ -96,7 +103,7 @@ public final class LlamaCppOcrClient {
 
 			StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 					page.pngPath(), page.pngByteSize(), this.properties.maxImageBytes(),
-					this.properties.model(), PROMPT, this.properties.maxTokens(),
+					this.properties.model(), prompt, this.properties.maxTokens(),
 					this.properties.temperature(), this.properties.topP(), this.objectMapper);
 
 			Request request = new Request.Builder()
@@ -107,7 +114,7 @@ public final class LlamaCppOcrClient {
 					.build();
 
 			try (Response response = this.httpClient.newCall(request).execute()) {
-				return this.handleResponse(response, page.documentId());
+				return this.handleResponse(response, page.documentId(), promptVersion);
 			}
 		}
 		catch (OcrException e) {
@@ -132,7 +139,7 @@ public final class LlamaCppOcrClient {
 		}
 	}
 
-	private OcrResult handleResponse(Response response, java.util.UUID documentId) throws IOException {
+	private OcrResult handleResponse(Response response, java.util.UUID documentId, int promptVersion) throws IOException {
 		int status = response.code();
 
 		if (status != 200) {
@@ -180,7 +187,7 @@ public final class LlamaCppOcrClient {
 			// Validate the response structure.
 			String text = validateAndExtract(root, documentId);
 			response.close();
-			return new OcrResult(documentId, text, this.properties.model(), "stop", PROMPT_VERSION);
+			return new OcrResult(documentId, text, this.properties.model(), "stop", promptVersion);
 		}
 		catch (OcrException e) {
 			throw e;

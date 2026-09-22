@@ -249,8 +249,13 @@ public class PosRecordCommandService {
 		if (documents.isEmpty()) {
 			return false;
 		}
+		// Verification is blocked only while ingestion is still in progress. In the
+		// structured workflow documents end in a terminal state (COMPLETED, FAILED for a
+		// candidate whose page could not be rendered, or SKIPPED), so none of these may
+		// block verification.
 		for (PosDocumentEntity document : documents) {
-			if (document.getProcessingStatus() != DocumentProcessingStatus.COMPLETED) {
+			if (document.getProcessingStatus() == DocumentProcessingStatus.PENDING
+					|| document.getProcessingStatus() == DocumentProcessingStatus.PROCESSING) {
 				return false;
 			}
 		}

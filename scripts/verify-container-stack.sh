@@ -405,7 +405,7 @@ echo "security: protected endpoint without token -> 401 AUTHENTICATION_REQUIRED"
 echo "== stack upload (committed fixture) =="
 # Relative path: the script has already cd to the repository root, so curl
 # (including Windows curl) can read the file.
-FIXTURE="src/test/resources/fixtures/valid-two-pdf.zip"
+FIXTURE="src/test/resources/fixtures/valid-with-lappe.zip"
 [ -f "${FIXTURE}" ] || { echo "ERROR: fixture ${FIXTURE} is missing." >&2; exit 1; }
 UPLOAD_RESPONSE_FILE="$(mktemp "pos-doc-task2-test-upload.XXXXXX")"
 UPLOAD_CODE="$(curl --silent --max-time 15 --output "${UPLOAD_RESPONSE_FILE}" --write-out '%{http_code}' \
@@ -620,7 +620,7 @@ if [ "${HAS_NON_NULL_ERROR_CODE}" -eq 1 ] || [ "${HAS_NON_NULL_ERROR_MESSAGE}" -
 fi
 echo "job: no terminal error"
 
-echo "== pos_document: exactly two ordered COMPLETED rows (Task 9) =="
+echo "== pos_document: candidate COMPLETED + non-candidate SKIPPED =="
 DOCS_RESPONSE="$(curl --fail --silent --show-error --header "${AUTH_HEADER}" \
     http://localhost:18080/api/v1/pos-records/${POS_RECORD_ID}/documents)"
 COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"posRecordId":"[0-9a-f-]\{36\}"' | wc -l | tr -d ' ')"
@@ -628,13 +628,13 @@ if [ "${COUNT}" != "2" ]; then
     echo "ERROR: expected 2 documents, got ${COUNT}: ${DOCS_RESPONSE}" >&2
     exit 1
 fi
-case "${DOCS_RESPONSE}" in
-    *'"processingStatus":"COMPLETED"'*'"processingStatus":"COMPLETED"'*)
-        echo "documents: two rows, both COMPLETED" ;;
-    *)
-        echo "ERROR: documents not in COMPLETED state: ${DOCS_RESPONSE}" >&2
-        exit 1 ;;
-esac
+COMPLETED_COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"processingStatus":"COMPLETED"' | wc -l | tr -d ' ')"
+SKIPPED_COUNT="$(printf '%s' "${DOCS_RESPONSE}" | grep -o '"processingStatus":"SKIPPED"' | wc -l | tr -d ' ')"
+if [ "${COMPLETED_COUNT}" != "1" ] || [ "${SKIPPED_COUNT}" != "1" ]; then
+    echo "ERROR: expected 1 COMPLETED (LAPPe candidate) + 1 SKIPPED, got ${COMPLETED_COUNT} COMPLETED / ${SKIPPED_COUNT} SKIPPED: ${DOCS_RESPONSE}" >&2
+    exit 1
+fi
+echo "documents: candidate COMPLETED + non-candidate SKIPPED"
 
 # Use a test-only SQLite CLI container attached read-only to the SQLite
 # volume, since the backend runtime image contains the JRE and curl but
@@ -730,7 +730,7 @@ for KEY in ${EXTRACTED_KEYS}; do
     KEY="$(printf '%s' "${KEY}" | tr -d '\r')"
     SAFE_KEY="$(printf '%s' "${KEY}" | tr '/' '_')"
     ACTUAL_HASH="$(sha256sum "${EXTRACT_DIR}/${SAFE_KEY}" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
-    for ENTRY in documents/first.pdf documents/second.pdf; do
+    for ENTRY in documents/LAPPe.pdf documents/other.pdf; do
         EXPECTED_HASH="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" "${ENTRY}" 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
         if [ "${ACTUAL_HASH}" = "${EXPECTED_HASH}" ]; then
             MATCH=$((MATCH + 1))
@@ -758,27 +758,51 @@ echo "ocr-stub: WireMock healthy (HTTP 200 from /__admin/mappings)"
 
 echo "== OCR request count via WireMock request-count endpoint =="
 OCR_REQUEST_COUNT="$(ocr_request_count)"
-if [ "${OCR_REQUEST_COUNT}" != "2" ]; then
-    echo "ERROR: expected 2 OCR requests in WireMock journal, got ${OCR_REQUEST_COUNT}." >&2
+if [ "${OCR_REQUEST_COUNT}" != "3" ]; then
+    echo "ERROR: expected 3 OCR requests in WireMock journal (one per field), got ${OCR_REQUEST_COUNT}." >&2
     exit 1
 fi
-echo "wiremock: exactly 2 OCR requests recorded"
+echo "wiremock: exactly 3 OCR requests recorded (one per field)"
 
-echo "== OCR results in SQLite =="
-OCR_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM document_ocr_result WHERE prompt_version = 1;")"
-if [ "${OCR_RESULT_COUNT}" != "2" ]; then
-    echo "ERROR: expected 2 version-1 OCR results, got ${OCR_RESULT_COUNT}." >&2
+echo "== structured field outcomes in SQLite =="
+FIELD_RESULT_COUNT="$(sqlite_query "SELECT count(*) FROM pos_field_extraction WHERE prompt_version = 2;")"
+if [ "${FIELD_RESULT_COUNT}" != "3" ]; then
+    echo "ERROR: expected 3 version-2 field outcomes, got ${FIELD_RESULT_COUNT}." >&2
     exit 1
 fi
-echo "sqlite: 2 version-1 OCR results present"
+FIELD_RESOLVED="$(sqlite_query "SELECT count(*) FROM pos_field_extraction WHERE outcome = 'RESOLVED';")"
+if [ "${FIELD_RESOLVED}" != "3" ]; then
+    echo "ERROR: expected 3 RESOLVED field outcomes, got ${FIELD_RESOLVED}." >&2
+    exit 1
+fi
+echo "sqlite: 3 version-2 field outcomes present (all RESOLVED)"
+
+echo "== field values are the deterministic stub values =="
+PH_VALUE="$(sqlite_query "SELECT value_text FROM pos_field_extraction WHERE field_name = 'POLICYHOLDER_NAME';")"
+CS_VALUE="$(sqlite_query "SELECT value_text FROM pos_field_extraction WHERE field_name = 'CONSULTANT_NAME';")"
+DT_VALUE="$(sqlite_query "SELECT value_text FROM pos_field_extraction WHERE field_name = 'POLICY_CREATE_DATE';")"
+[ "${PH_VALUE}" = "Charlie Henry" ] || { echo "ERROR: policyholder value is '${PH_VALUE}', expected 'Charlie Henry'." >&2; exit 1; }
+[ "${CS_VALUE}" = "John Davidson" ] || { echo "ERROR: consultant value is '${CS_VALUE}', expected 'John Davidson'." >&2; exit 1; }
+[ "${DT_VALUE}" = "2026-07-26" ] || { echo "ERROR: date value is '${DT_VALUE}', expected '2026-07-26'." >&2; exit 1; }
+echo "field values: Charlie Henry / John Davidson / 2026-07-26"
+
+echo "== resolved business fields applied to the record =="
+RECORD_POLICYHOLDER="$(sqlite_query "SELECT policyholder_name FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
+RECORD_CONSULTANT="$(sqlite_query "SELECT consultant_name FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
+RECORD_DATE="$(sqlite_query "SELECT policy_create_date FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
+[ "${RECORD_POLICYHOLDER}" = "Charlie Henry" ] || { echo "ERROR: record policyholder_name is '${RECORD_POLICYHOLDER}', expected 'Charlie Henry'." >&2; exit 1; }
+[ "${RECORD_CONSULTANT}" = "John Davidson" ] || { echo "ERROR: record consultant_name is '${RECORD_CONSULTANT}', expected 'John Davidson'." >&2; exit 1; }
+[ "${RECORD_DATE}" = "2026-07-26" ] || { echo "ERROR: record policy_create_date is '${RECORD_DATE}', expected '2026-07-26'." >&2; exit 1; }
+echo "record business fields: policyholder/consultant/date applied"
 
 echo "== document and job statuses are final =="
-DOC_STATUS_COUNT="$(sqlite_query "SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';")"
-if [ "${DOC_STATUS_COUNT}" != "2" ]; then
-    echo "ERROR: expected 2 COMPLETED documents, got ${DOC_STATUS_COUNT}." >&2
+DOC_COMPLETED="$(sqlite_query "SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'COMPLETED';")"
+DOC_SKIPPED="$(sqlite_query "SELECT count(*) FROM pos_document WHERE pos_record_id = '${POS_RECORD_ID}' AND processing_status = 'SKIPPED';")"
+if [ "${DOC_COMPLETED}" != "1" ] || [ "${DOC_SKIPPED}" != "1" ]; then
+    echo "ERROR: expected 1 COMPLETED + 1 SKIPPED document, got ${DOC_COMPLETED} COMPLETED / ${DOC_SKIPPED} SKIPPED." >&2
     exit 1
 fi
-echo "documents: both COMPLETED"
+echo "documents: candidate COMPLETED + non-candidate SKIPPED"
 
 echo "== POS record is REVIEW_REQUIRED =="
 RECORD_STATUS="$(sqlite_query "SELECT status FROM pos_record WHERE id = '${POS_RECORD_ID}';")"
@@ -873,13 +897,13 @@ if [ "${COUNT_AFTER}" != "2" ]; then
 fi
 echo "duplicate: ACK'd as no-op; document count unchanged"
 
-# Verify the OCR request count remains 2 after duplicate delivery.
+# Verify the OCR request count remains 3 after duplicate delivery.
 OCR_REQUEST_COUNT_AFTER="$(ocr_request_count)"
-if [ "${OCR_REQUEST_COUNT_AFTER}" != "2" ]; then
-    echo "ERROR: expected 2 OCR requests after duplicate delivery, got ${OCR_REQUEST_COUNT_AFTER}." >&2
+if [ "${OCR_REQUEST_COUNT_AFTER}" != "3" ]; then
+    echo "ERROR: expected 3 OCR requests after duplicate delivery, got ${OCR_REQUEST_COUNT_AFTER}." >&2
     exit 1
 fi
-echo "wiremock: still exactly 2 OCR requests after duplicate delivery"
+echo "wiremock: still exactly 3 OCR requests after duplicate delivery"
 
 # --- Task 10: read/search/PATCH/verify/delete smoke flow -----------------------
 #
@@ -978,9 +1002,9 @@ echo "== content: downloaded PDFs are byte-for-byte the fixture PDFs =="
 # Compare the SORTED pair of actual hashes against the SORTED pair of expected
 # hashes so the match is one-to-one (two identical copies of first.pdf would not
 # pass, even though a naive count of "matched an entry" would reach 2/2).
-EXPECTED_PDF_HASHES="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" documents/first.pdf 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+EXPECTED_PDF_HASHES="$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" documents/LAPPe.pdf 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
 EXPECTED_PDF_HASHES="${EXPECTED_PDF_HASHES}
-$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" documents/second.pdf 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
+$(python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(sys.argv[2]))" "${FIXTURE}" documents/other.pdf 2>/dev/null | sha256sum | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
 ACTUAL_PDF_HASHES="$(sha256sum "${CONTENT_DIR}/${DOC1}.pdf" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"
 ACTUAL_PDF_HASHES="${ACTUAL_PDF_HASHES}
 $(sha256sum "${CONTENT_DIR}/${DOC2}.pdf" | sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p')"

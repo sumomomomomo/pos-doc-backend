@@ -110,9 +110,9 @@ public class ExtractionPersistenceService {
 			this.posDocumentRepository.saveAndFlush(document);
 		}
 
-		// The job is NOT completed here: Task 9 completes it only after
-		// every document has a durable version-1 OCR result. The OCR
-		// workflow (DocumentOcrWorkflowService) runs after this method
+		// The job is NOT completed here: the structured field-extraction
+		// workflow completes it after the candidate is processed. The
+		// workflow (StructuredFieldExtractionService) runs after this method
 		// returns and performs the final job completion.
 
 		log.info("Extraction persisted (category=persistence-success); posRecordId={}, jobId={}, pdfCount={}",

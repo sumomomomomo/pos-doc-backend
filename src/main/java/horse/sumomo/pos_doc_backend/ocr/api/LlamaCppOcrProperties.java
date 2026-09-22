@@ -25,6 +25,8 @@ public final class LlamaCppOcrProperties {
 	static final double MAX_TEMPERATURE = 2.0;
 	static final double MIN_TOP_P = 0.0;
 	static final double MAX_TOP_P = 1.0;
+	static final int MIN_MAX_ATTEMPTS = 1;
+	static final int MAX_MAX_ATTEMPTS = 3;
 
 	private final URI serverOrigin;
 	private final String chatCompletionsPath;
@@ -39,11 +41,13 @@ public final class LlamaCppOcrProperties {
 	private final double temperature;
 	private final double topP;
 	private final int maxConcurrentRequests;
+	private final int maxAttempts;
+	private final long retryBackoffMs;
 
 	public LlamaCppOcrProperties(String serverOrigin, String chatCompletionsPath, String model,
 			Duration connectTimeout, Duration readTimeout, Duration callTimeout, long maxImageBytes,
 			long maxResponseBytes, int maxOcrCharacters, int maxTokens, double temperature, double topP,
-			int maxConcurrentRequests) {
+			int maxConcurrentRequests, int maxAttempts, long retryBackoffMs) {
 		if (isBlank(serverOrigin)) {
 			throw new IllegalArgumentException("app.ocr.llama-cpp.server-origin must not be blank");
 		}
@@ -132,6 +136,14 @@ public final class LlamaCppOcrProperties {
 			throw new IllegalArgumentException(
 					"app.ocr.llama-cpp.max-concurrent-requests must be exactly 1");
 		}
+		if (maxAttempts < MIN_MAX_ATTEMPTS || maxAttempts > MAX_MAX_ATTEMPTS) {
+			throw new IllegalArgumentException(
+					"app.ocr.llama-cpp.max-attempts must be within [" + MIN_MAX_ATTEMPTS + ", " + MAX_MAX_ATTEMPTS
+						+ "]");
+		}
+		if (retryBackoffMs < 0) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.retry-backoff-ms must be non-negative");
+		}
 		this.serverOrigin = origin;
 		this.chatCompletionsPath = chatCompletionsPath.trim();
 		this.model = model.trim();
@@ -145,6 +157,8 @@ public final class LlamaCppOcrProperties {
 		this.temperature = temperature;
 		this.topP = topP;
 		this.maxConcurrentRequests = maxConcurrentRequests;
+		this.maxAttempts = maxAttempts;
+		this.retryBackoffMs = retryBackoffMs;
 	}
 
 	/**
@@ -214,6 +228,14 @@ public final class LlamaCppOcrProperties {
 		return this.maxConcurrentRequests;
 	}
 
+	public int maxAttempts() {
+		return this.maxAttempts;
+	}
+
+	public long retryBackoffMs() {
+		return this.retryBackoffMs;
+	}
+
 	private static boolean isBlank(String value) {
 		return value == null || value.isBlank();
 	}
@@ -232,7 +254,8 @@ public final class LlamaCppOcrProperties {
 				+ ", maxTokens=" + this.maxTokens
 				+ ", temperature=" + this.temperature
 				+ ", topP=" + this.topP
-				+ ", maxConcurrentRequests=" + this.maxConcurrentRequests + "]";
+				+ ", maxConcurrentRequests=" + this.maxConcurrentRequests
+			+ ", maxAttempts=" + this.maxAttempts + ", retryBackoffMs=" + this.retryBackoffMs + "]";
 	}
 
 }

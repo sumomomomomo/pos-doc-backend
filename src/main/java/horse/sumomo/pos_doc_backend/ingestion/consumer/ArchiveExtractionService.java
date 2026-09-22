@@ -10,7 +10,6 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
@@ -368,7 +367,9 @@ public class ArchiveExtractionService {
 	private static String lastSegment(String entryName) {
 		int idx = entryName.lastIndexOf('/');
 		String tail = idx < 0 ? entryName : entryName.substring(idx + 1);
-		return tail.toLowerCase(Locale.ROOT);
+		// Preserve the original case: candidate selection matches the basename
+		// case-sensitively against "LAPPe.pdf", so the stored name must keep case.
+		return tail;
 	}
 
 	private static String hexLowercase(byte[] bytes) {

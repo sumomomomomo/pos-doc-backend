@@ -133,6 +133,20 @@ public final class OcrHttpStub implements AutoCloseable {
 		this.nextResponseContentType = "application/json";
 	}
 
+	/**
+	 * Full reset: clears queued responses, resets the default response, and
+	 * zeroes the recorded-request count and history. Intended for use between
+	 * tests that share one stub instance. Thread-safe.
+	 */
+	public synchronized void reset() {
+		this.responseQueue.clear();
+		this.nextResponseJson = buildResponse(SYNTHETIC_OCR_TEXT);
+		this.nextResponseStatus = 200;
+		this.nextResponseContentType = "application/json";
+		this.requestCount.set(0);
+		this.requests.clear();
+	}
+
 	@Override
 	public void close() throws IOException {
 		this.running = false;
