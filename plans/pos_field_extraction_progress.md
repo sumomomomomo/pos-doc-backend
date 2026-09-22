@@ -67,9 +67,15 @@ Branch: `task-pos-field-extraction` (base `main`)
 - [x] **5. `updatedAt` on field update** — `applyResolvedField` stamps `updatedAt` in the same transaction only when a null field is actually filled; a no-op (existing user value) changes neither timestamp nor version.
 - [x] New tests: backoff-interruption escaping, `UNKNOWN (123)` sentinel, trailing-newline trim, long names, label/prose-without-colon, redelivery no-re-render of a COMPLETED candidate, user-update-between-requests, timestamp/version-only-on-update, and a real-broker partial-recovery scenario (transient render failure on the second candidate; first candidate not re-rendered).
 
+## ChatGPT review round 3 (PR #3 — final parser correction)
+- [x] **Prefix-based label detection** — replaced the word-anywhere `NAME_LABEL_MARKERS` check with a `NAME_LABEL_PREFIXES` list; a name is rejected only if it starts with a known label/prose prefix (`Policyowner Name ...`, `Policyholder Name ...`, `Consultant Name ...`, `Financial Consultant Name ...`, `The name is ...`, `The policyholder is ...`, ...). A legitimate surname that merely contains a label-like word (e.g. `Masamune Date`) is now accepted. Colon-delimited labels are still rejected by the colon check.
+- [x] **Periods in name initials** — `isNameLike` is now token-based: each whitespace token is either an initial (a single letter, optionally followed by a period) or a word of letters/apostrophes/hyphens. So `A. K. Tan` is valid while ellipses (`explanation...`), sentence-ending periods, digits, and other punctuation remain invalid.
+- [x] New tests: `Masamune Date` RESOLVED, `A. K. Tan` RESOLVED, `Policyowner Name Charlie Henry` INVALID, `The name is Charlie Henry` INVALID, `Additional explanation...` INVALID; `labelProsePrefixesAreRejected` (prefix forms, including `Consultant Name ...` / `Financial Consultant Name ...`).
+
 ## Final verification (consistent result)
-- [x] `./mvnw -o clean verify` (run 1) — **711 tests, 0 failures, 0 errors**.
-- [x] `./mvnw -o clean verify` (run 2) — **711 tests, 0 failures, 0 errors**.
+- [x] `./mvnw -o test` — **714 tests, 0 failures, 0 errors** (after round 3).
+- [x] `./mvnw -o clean verify` (run 1) — **711 tests, 0 failures, 0 errors** (round 2).
+- [x] `./mvnw -o clean verify` (run 2) — **711 tests, 0 failures, 0 errors** (round 2).
 - [x] `docker compose --env-file .env.example config --quiet` — OK.
 - [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (job COMPLETED/attemptCount=1; candidate COMPLETED + non-candidate SKIPPED; exactly 3 OCR requests (one per field) and still 3 after duplicate delivery; 3 version-2 RESOLVED outcomes; field values Charlie Henry / John Davidson / 2026-07-26 applied).
 

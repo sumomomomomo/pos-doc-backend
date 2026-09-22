@@ -177,11 +177,13 @@ This replaces the old "OCR every PDF" workflow:
   `UNKNOWN` (absent/unreadable), or `FAILED` (a stable, PII-free error code).
   Only the value stored in the winning (authoritative) upsert row is applied to
   the record. Values are canonicalized: a name must be a single line of letters,
-  spaces, apostrophes, and hyphens (no word-count cap, but field labels / prose
-  words such as `name` or `policyowner` are rejected), and the policyholder's
-  trailing bracketed ID is stripped before validation (so `UNKNOWN (123)` is an
-  unresolved token, never a name); the submission date `dd-MMM-yyyy` is
-  validated and stored as ISO `yyyy-MM-dd`.
+  spaces, apostrophes, hyphens, and single-letter initials (so `A. K. Tan` is
+  valid) — no word-count cap, but a known label/prose prefix (`Policyowner Name
+  ...`, `The name is ...`) or a colon is rejected as prose while a legitimate
+  surname that merely contains a label-like word (`Masamune Date`) is accepted —
+  and the policyholder's trailing bracketed ID is stripped before validation (so
+  `UNKNOWN (123)` is an unresolved token, never a name); the submission date
+  `dd-MMM-yyyy` is validated and stored as ISO `yyyy-MM-dd`.
 - **Render failure** — a permanent render failure for a candidate (corrupt,
   encrypted, or otherwise invalid PDF) marks that candidate `FAILED` and the
   workflow moves on to the next candidate (best-effort; the job still completes).

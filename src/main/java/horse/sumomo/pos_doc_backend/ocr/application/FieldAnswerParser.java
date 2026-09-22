@@ -2,6 +2,7 @@ package horse.sumomo.pos_doc_backend.ocr.application;
 
 import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -26,17 +27,20 @@ import horse.sumomo.pos_doc_backend.persistence.model.ExtractionField;
  *       workflow treats this as a failed attempt and retries.</li>
  * </ul>
  *
- * <p>Names must be a single line of letters, spaces, apostrophes and hyphens
- * and contain at least one Unicode letter; there is no word-count cap (a
- * legitimate multi-word name is accepted). Leading/trailing whitespace
- * (including a trailing newline) is trimmed first; an <em>internal</em> newline
- * remains invalid. For the policyholder only, a trailing bracketed
- * identification number (e.g. {@code (S1234567A)} or {@code [S1234567A]}) is
- * removed, and blank, sentinel, label, ambiguity, and name validation are then
- * re-run on the trimmed result, so {@code "UNKNOWN (123)"} is an unresolved
- * token, never a name. An answer that contains a field-label word (e.g.
- * {@code name}, {@code policyowner}, {@code consultant}) or a colon is rejected
- * as prose, not a bare name.
+ * <p>Names must be a single line of letters, spaces, apostrophes, hyphens and
+ * single-letter initials (a letter optionally followed by a period, so
+ * {@code A. K. Tan} is valid) and contain at least one Unicode letter; there is
+ * no word-count cap (a legitimate multi-word name is accepted). Leading/trailing
+ * whitespace (including a trailing newline) is trimmed first; an <em>internal</em>
+ * newline, ellipses, and sentence-ending periods remain invalid. For the
+ * policyholder only, a trailing bracketed identification number (e.g.
+ * {@code (S1234567A)} or {@code [S1234567A]}) is removed, and blank, sentinel,
+ * label, ambiguity, and name validation are then re-run on the trimmed result, so
+ * {@code "UNKNOWN (123)"} is an unresolved token, never a name. An answer that
+ * carries a known label/prose prefix (e.g. {@code Policyowner Name ...},
+ * {@code The name is ...}) or a colon is rejected as prose, not a bare name; a
+ * legitimate surname that merely contains a label-like word ({@code Masamune
+ * Date}) is still accepted.
  */
 public final class FieldAnswerParser {
 
@@ -61,12 +65,20 @@ public final class FieldAnswerParser {
 			"NOT SPECIFIED", "UNSPECIFIED", "NOT APPLICABLE");
 
 	/**
-	 * Whole words that identify the answer as a field label or prose rather than a
-	 * bare name. A legitimate person's name never contains one of these as a
-	 * standalone word.
+	 * Known label/prose prefixes that identify an answer as a field label or prose
+	 * rather than a bare name. Detection is prefix-based (the answer starts with the
+	 * phrase), so a legitimate surname that merely contains a label-like word (e.g.
+	 * "Masamune Date") is still accepted. Colon-delimited labels are rejected
+	 * separately by the colon check.
 	 */
-	private static final Set<String> NAME_LABEL_MARKERS = Set.of(
-			"name", "policyholder", "policyowner", "consultant", "submission", "date");
+	private static final List<String> NAME_LABEL_PREFIXES = List.of(
+			"policyowner name", "policyholder name", "policy owner name", "policy holder name",
+			"consultant name", "financial consultant name",
+			"the name is", "name is",
+			"the policyholder is", "policyholder is",
+			"the policyowner is", "policyowner is",
+			"the consultant is", "consultant is",
+			"the financial consultant is", "financial consultant is");
 
 	private FieldAnswerParser() {
 	}
@@ -132,7 +144,7 @@ public final class FieldAnswerParser {
 		if (ALTERNATIVE.matcher(s).find()) {
 			return FieldAnswerParse.invalid();
 		}
-		if (containsNameLabel(s)) {
+		if (startsWithLabelPrefix(s)) {
 			return FieldAnswerParse.invalid();
 		}
 		if (!containsUnicodeLetter(s) || !isNameLike(s)) {
@@ -170,9 +182,10 @@ public final class FieldAnswerParser {
 		return UNKNOWN_TOKENS.contains(s.toUpperCase(Locale.ROOT));
 	}
 
-	private static boolean containsNameLabel(String s) {
-		for (String word : s.toLowerCase(Locale.ROOT).split(" ")) {
-			if (NAME_LABEL_MARKERS.contains(word)) {
+	private static boolean startsWithLabelPrefix(String s) {
+		String lower = s.toLowerCase(Locale.ROOT);
+		for (String prefix : NAME_LABEL_PREFIXES) {
+			if (lower.equals(prefix) || lower.startsWith(prefix + " ")) {
 				return true;
 			}
 		}
@@ -198,12 +211,40 @@ public final class FieldAnswerParser {
 		return false;
 	}
 
+	/**
+	 * Validates the name's character content. The name is split into whitespace
+	 * tokens; each token is either an initial (a single letter, optionally followed
+	 * by a period, e.g. "A" or "A.") or a regular word of letters, apostrophes and
+	 * hyphens (no periods, digits or other punctuation). This permits name initials
+	 * such as "A. K. Tan" while still rejecting ellipses ("explanation..."),
+	 * sentence-ending periods, digits and other punctuation.
+	 */
 	private static boolean isNameLike(String s) {
-		for (int i = 0; i < s.length(); i++) {
-			char c = s.charAt(i);
-			boolean allowed = Character.isLetter(c) || c == ' ' || c == '\'' || c == '\u2019'
-					|| c == '-' || c == '\u2010' || c == '\u2011' || c == '\u2013';
-			if (!allowed) {
+		for (String token : s.split(" ")) {
+			if (!isNameToken(token)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** A valid name token: an initial ("A", "A.") or a word of letters/apostrophes/hyphens. */
+	private static boolean isNameToken(String token) {
+		if (token.isEmpty() || !Character.isLetter(token.charAt(0))) {
+			return false;
+		}
+		// An initial: a single letter, optionally followed by a period.
+		if (token.length() <= 2) {
+			if (token.length() == 1) {
+				return true;
+			}
+			return token.charAt(1) == '.';
+		}
+		// A regular word: letters, apostrophes and hyphens only (no periods/digits).
+		for (int i = 1; i < token.length(); i++) {
+			char c = token.charAt(i);
+			if (!Character.isLetter(c) && c != '\'' && c != '\u2019'
+					&& c != '-' && c != '\u2010' && c != '\u2011' && c != '\u2013') {
 				return false;
 			}
 		}

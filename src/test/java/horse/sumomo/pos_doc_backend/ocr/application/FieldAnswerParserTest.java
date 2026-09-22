@@ -176,24 +176,49 @@ class FieldAnswerParserTest {
 
 	@Test
 	void proseIsRejected() {
-		// A period is not a name character.
+		// An ellipsis is not a name character (periods are only allowed in single-letter initials).
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Additional explanation...").kind());
-		// A label/prose answer (a field-label word) is not a bare name, even with no colon.
+		// A label/prose prefix ("The policyholder is ...") is not a bare name, even with no colon.
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "The policyholder is Charlie Henry").kind());
 	}
 
 	@Test
-	void labelProseWithoutColonIsRejected() {
-		// Short explanatory answers that contain only letters/spaces and no colon are
-		// still rejected because they carry a field-label word.
-		assertEquals(ParseKind.INVALID,
-				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "The name is Charlie").kind());
+	void labelProsePrefixesAreRejected() {
+		// Answers carrying a known label/prose prefix are rejected even when they
+		// contain only letters/spaces and no colon.
 		assertEquals(ParseKind.INVALID,
 				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Policyowner Name Charlie Henry").kind());
 		assertEquals(ParseKind.INVALID,
-				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "Consultant John Davidson").kind());
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "The name is Charlie Henry").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "Consultant Name John Davidson").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.CONSULTANT_NAME, "Financial Consultant Name John Davidson").kind());
+	}
+
+	@Test
+	void surnameContainingLabelWordIsResolved() {
+		// "Date" is a real surname, not a label: it must be resolved, not rejected.
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Masamune Date");
+		assertEquals(ParseKind.RESOLVED, p.kind());
+		assertEquals("Masamune Date", p.value());
+	}
+
+	@Test
+	void initialsWithPeriodsAreResolved() {
+		// Periods used in single-letter name initials are permitted.
+		FieldAnswerParse p = FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "A. K. Tan");
+		assertEquals(ParseKind.RESOLVED, p.kind());
+		assertEquals("A. K. Tan", p.value());
+	}
+
+	@Test
+	void ellipsisIsStillInvalid() {
+		// Ellipses (and periods that are not single-letter initials) remain invalid.
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Additional explanation...").kind());
 	}
 
 	@Test
