@@ -215,6 +215,28 @@ class FieldAnswerParserTest {
 	}
 
 	@Test
+	void twoLetterNameComponentsAreResolved() {
+		// Ordinary two-letter name words (common in Singaporean names) are regular
+		// words, not initials: they must be accepted, not rejected as malformed initials.
+		assertEquals("Li Wei",
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Li Wei").value());
+		assertEquals("Ng Wei",
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Ng Wei").value());
+		assertEquals("Wu Bo",
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Wu Bo").value());
+	}
+
+	@Test
+	void nonInitialTrailingPeriodsAreInvalid() {
+		// A period after a multi-letter word ("Tan.") or after two letters ("AB.") is
+		// not a single-letter initial and remains invalid.
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "Tan.").kind());
+		assertEquals(ParseKind.INVALID,
+				FieldAnswerParser.parse(ExtractionField.POLICYHOLDER_NAME, "AB.").kind());
+	}
+
+	@Test
 	void ellipsisIsStillInvalid() {
 		// Ellipses (and periods that are not single-letter initials) remain invalid.
 		assertEquals(ParseKind.INVALID,

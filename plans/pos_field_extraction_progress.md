@@ -72,12 +72,16 @@ Branch: `task-pos-field-extraction` (base `main`)
 - [x] **Periods in name initials** — `isNameLike` is now token-based: each whitespace token is either an initial (a single letter, optionally followed by a period) or a word of letters/apostrophes/hyphens. So `A. K. Tan` is valid while ellipses (`explanation...`), sentence-ending periods, digits, and other punctuation remain invalid.
 - [x] New tests: `Masamune Date` RESOLVED, `A. K. Tan` RESOLVED, `Policyowner Name Charlie Henry` INVALID, `The name is Charlie Henry` INVALID, `Additional explanation...` INVALID; `labelProsePrefixesAreRejected` (prefix forms, including `Consultant Name ...` / `Financial Consultant Name ...`).
 
+## ChatGPT review round 4 (PR #3 — two-letter name regression)
+- [x] **Two-letter names no longer rejected** — `isNameToken` previously treated every two-character token as an initial (accepted only if the second char was `.`), so ordinary two-letter name words ("Li", "Ng", "Wu") were `INVALID`. Fixed: only the exact letter-plus-period shape is a single-letter initial ("A", "A."); every other token is validated as a regular word of letters/apostrophes/hyphens. `Li Wei`, `Ng Wei`, `Wu Bo` are now RESOLVED; `A. K. Tan` stays RESOLVED; `Tan.` and `AB.` stay INVALID; digits/ellipses/other punctuation stay INVALID.
+- [x] New tests: `twoLetterNameComponentsAreResolved` (Li Wei / Ng Wei / Wu Bo RESOLVED), `nonInitialTrailingPeriodsAreInvalid` (Tan. / AB. INVALID). Parser suite now 42 cases.
+
 ## Final verification (consistent result)
+- [x] `./mvnw -o clean verify` (round 4, run 1) — **716 tests, 0 failures, 0 errors**.
+- [x] `./mvnw -o clean verify` (round 4, run 2) — **716 tests, 0 failures, 0 errors**.
 - [x] `./mvnw -o test` — **714 tests, 0 failures, 0 errors** (after round 3).
-- [x] `./mvnw -o clean verify` (run 1) — **711 tests, 0 failures, 0 errors** (round 2).
-- [x] `./mvnw -o clean verify` (run 2) — **711 tests, 0 failures, 0 errors** (round 2).
 - [x] `docker compose --env-file .env.example config --quiet` — OK.
-- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (job COMPLETED/attemptCount=1; candidate COMPLETED + non-candidate SKIPPED; exactly 3 OCR requests (one per field) and still 3 after duplicate delivery; 3 version-2 RESOLVED outcomes; field values Charlie Henry / John Davidson / 2026-07-26 applied).
+- [x] `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (round 3: job COMPLETED/attemptCount=1; candidate COMPLETED + non-candidate SKIPPED; exactly 3 OCR requests (one per field) and still 3 after duplicate delivery; field values Charlie Henry / John Davidson / 2026-07-26 applied).
 
 ## Deviations from spec
 - Kept `DocumentOcrPersistenceService` + its integration tests (historical, for the retained `document_ocr_result` table); it is no longer on the consumer path.

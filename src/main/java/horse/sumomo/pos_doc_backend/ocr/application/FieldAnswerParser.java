@@ -228,19 +228,26 @@ public final class FieldAnswerParser {
 		return true;
 	}
 
-	/** A valid name token: an initial ("A", "A.") or a word of letters/apostrophes/hyphens. */
+	/**
+	 * A valid name token. Only the exact letter-plus-period shape is a single-letter
+	 * initial ("A", "A."); every other token — including an ordinary two-letter word
+	 * ("Li", "Ng", "Wu") — is validated as a regular word of letters, apostrophes,
+	 * curly apostrophes and hyphens (no periods, digits or other punctuation).
+	 */
 	private static boolean isNameToken(String token) {
 		if (token.isEmpty() || !Character.isLetter(token.charAt(0))) {
 			return false;
 		}
-		// An initial: a single letter, optionally followed by a period.
-		if (token.length() <= 2) {
-			if (token.length() == 1) {
-				return true;
-			}
-			return token.charAt(1) == '.';
+		// A single letter (an initial) is always valid.
+		if (token.length() == 1) {
+			return true;
 		}
-		// A regular word: letters, apostrophes and hyphens only (no periods/digits).
+		// A single-letter initial with a trailing period ("A.").
+		if (token.length() == 2 && token.charAt(1) == '.') {
+			return true;
+		}
+		// Otherwise a regular word: letters, apostrophes and hyphens only
+		// (no periods, digits or other punctuation).
 		for (int i = 1; i < token.length(); i++) {
 			char c = token.charAt(i);
 			if (!Character.isLetter(c) && c != '\'' && c != '\u2019'
