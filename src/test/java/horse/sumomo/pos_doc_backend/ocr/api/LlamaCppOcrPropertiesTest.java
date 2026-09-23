@@ -7,8 +7,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import horse.sumomo.pos_doc_backend.rendering.api.FirstPageRenderingProperties;
 
@@ -257,30 +262,6 @@ class LlamaCppOcrPropertiesTest {
 	}
 
 	@Test
-	void temperatureNaNIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, Double.NaN, TOP_P,
-						TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
-	void temperaturePositiveInfinityIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, Double.POSITIVE_INFINITY, TOP_P,
-						TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
-	void temperatureNegativeInfinityIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, Double.NEGATIVE_INFINITY, TOP_P,
-						TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
 	void topPAtZeroIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
@@ -293,22 +274,6 @@ class LlamaCppOcrPropertiesTest {
 		assertThrows(IllegalArgumentException.class,
 				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
 						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, 1.1,
-						TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
-	void topPNaNIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, Double.NaN,
-						TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
-	void topPPositiveInfinityIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, Double.POSITIVE_INFINITY,
 						TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
 	}
 
@@ -355,22 +320,6 @@ class LlamaCppOcrPropertiesTest {
 	}
 
 	@Test
-	void minPNaNIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P,
-						TOP_K, Double.NaN, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
-	void minPInfinityIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P,
-						TOP_K, Double.POSITIVE_INFINITY, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
 	void presencePenaltyBelowMinusTwoIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
@@ -397,22 +346,6 @@ class LlamaCppOcrPropertiesTest {
 	}
 
 	@Test
-	void presencePenaltyNaNIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P,
-						TOP_K, MIN_P, Double.NaN, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
-	void presencePenaltyInfinityIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P,
-						TOP_K, MIN_P, Double.NEGATIVE_INFINITY, REPEAT_PENALTY, 1, 3, 0));
-	}
-
-	@Test
 	void repeatPenaltyZeroIsRejected() {
 		assertThrows(IllegalArgumentException.class,
 				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
@@ -428,20 +361,33 @@ class LlamaCppOcrPropertiesTest {
 						TOP_K, MIN_P, PRESENCE_PENALTY, -1.0, 1, 3, 0));
 	}
 
-	@Test
-	void repeatPenaltyNaNIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P,
-						TOP_K, MIN_P, PRESENCE_PENALTY, Double.NaN, 1, 3, 0));
+	@ParameterizedTest(name = "{0} rejects non-finite value {1}")
+	@MethodSource("nonFiniteSamplingValues")
+	void nonFiniteSamplingValuesAreRejected(String property, double badValue) {
+		assertThrows(IllegalArgumentException.class, () -> buildWithNonFinite(property, badValue));
 	}
 
-	@Test
-	void repeatPenaltyInfinityIsRejected() {
-		assertThrows(IllegalArgumentException.class,
-				() -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL,
-						CONNECT, READ, CALL, 33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P,
-						TOP_K, MIN_P, PRESENCE_PENALTY, Double.POSITIVE_INFINITY, 1, 3, 0));
+	static Stream<Arguments> nonFiniteSamplingValues() {
+		Double[] values = { Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY };
+		return Stream.of("temperature", "topP", "minP", "presencePenalty", "repeatPenalty")
+				.flatMap(property -> Arrays.stream(values)
+						.map(bad -> Arguments.of(property, bad)));
+	}
+
+	private static LlamaCppOcrProperties buildWithNonFinite(String property, double bad) {
+		return switch (property) {
+			case "temperature" -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL, CONNECT, READ, CALL,
+					33554432L, 2097152L, 1000000, MAX_TOKENS, bad, TOP_P, TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0);
+			case "topP" -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL, CONNECT, READ, CALL,
+					33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, bad, TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0);
+			case "minP" -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL, CONNECT, READ, CALL,
+					33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P, TOP_K, bad, PRESENCE_PENALTY, REPEAT_PENALTY, 1, 3, 0);
+			case "presencePenalty" -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL, CONNECT, READ, CALL,
+					33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P, TOP_K, MIN_P, bad, REPEAT_PENALTY, 1, 3, 0);
+			case "repeatPenalty" -> c(PRODUCTION_ORIGIN, PRODUCTION_PATH, PRODUCTION_MODEL, CONNECT, READ, CALL,
+					33554432L, 2097152L, 1000000, MAX_TOKENS, TEMPERATURE, TOP_P, TOP_K, MIN_P, PRESENCE_PENALTY, bad, 1, 3, 0);
+			default -> throw new IllegalArgumentException("unknown property: " + property);
+		};
 	}
 
 	@Test

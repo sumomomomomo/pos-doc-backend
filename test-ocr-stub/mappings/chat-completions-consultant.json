@@ -5,6 +5,12 @@
     "bodyPatterns": [
       {
         "matchesJsonPath": {
+          "expression": "$.model",
+          "equalTo": "task12-test-model"
+        }
+      },
+      {
+        "matchesJsonPath": {
           "expression": "$.messages[0].content[1].text",
           "equalTo": "Return only the Financial Consultant Name shown in brackets in this document. Do not include brackets, labels, identification numbers, or any other text. Example output: John Davidson. If the field is absent, unreadable, or ambiguous, return exactly UNKNOWN."
         }

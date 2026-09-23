@@ -5,6 +5,12 @@
     "bodyPatterns": [
       {
         "matchesJsonPath": {
+          "expression": "$.model",
+          "equalTo": "task12-test-model"
+        }
+      },
+      {
+        "matchesJsonPath": {
           "expression": "$.messages[0].content[1].text",
           "equalTo": "Return only the Submission Date shown in this document, formatted exactly as dd-MMM-yyyy using English month abbreviations. Example output: 26-Jul-2026. If the field is absent, unreadable, or ambiguous, return exactly UNKNOWN."
         }

@@ -5,6 +5,12 @@
     "bodyPatterns": [
       {
         "matchesJsonPath": {
+          "expression": "$.model",
+          "equalTo": "task12-test-model"
+        }
+      },
+      {
+        "matchesJsonPath": {
           "expression": "$.messages[0].content[1].text",
           "equalTo": "Return only the value of the Policyowner Name shown in this document. Exclude any bracketed identification number that follows the name. Example output: Charlie Henry. If the field is absent, unreadable, or ambiguous, return exactly UNKNOWN."
         }
