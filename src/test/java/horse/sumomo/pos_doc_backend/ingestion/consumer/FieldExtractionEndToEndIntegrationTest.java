@@ -81,6 +81,7 @@ class FieldExtractionEndToEndIntegrationTest {
 			DockerImageName.parse("cgr.dev/chainguard/minio:latest").asCompatibleSubstituteFor("minio/minio");
 	private static final byte[] PDF_CANDIDATE = SyntheticPdfFactory.createPdf("LAPPe Doc");
 	private static final byte[] PDF_OTHER = SyntheticPdfFactory.createPdf("Other Doc");
+	private static final String MODEL = "task12-test-model";
 
 	private static MinIOContainer minio;
 	private static RabbitMQContainer rabbit;
@@ -130,6 +131,7 @@ class FieldExtractionEndToEndIntegrationTest {
 		registry.add("spring.rabbitmq.password", rabbit::getAdminPassword);
 
 		registry.add("app.ocr.llama-cpp.server-origin", ocrStub::getServerOrigin);
+		registry.add("app.ocr.llama-cpp.model", () -> MODEL);
 
 		Path sqliteDbFile = Files.createTempFile("pos-doc-field-e2e-test", ".db");
 		sqliteDbFile.toFile().deleteOnExit();
@@ -227,7 +229,7 @@ class FieldExtractionEndToEndIntegrationTest {
 						+ "WHERE d.pos_record_id = ? AND s.original_filename = 'LAPPe.pdf'",
 				String.class, posRecordId.toString());
 		int outcomeCount = this.jdbc.queryForObject(
-				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND prompt_version = 2",
+				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND prompt_version = 3",
 				Integer.class, candidateId);
 		assertEquals(3, outcomeCount, "three version-2 outcomes must exist for the candidate");
 

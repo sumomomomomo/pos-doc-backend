@@ -3,7 +3,6 @@ package horse.sumomo.pos_doc_backend.ocr.client;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,7 +10,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
@@ -35,11 +33,15 @@ import okio.Buffer;
  */
 class StreamingPngChatRequestBodyTest {
 
-	private static final String MODEL = "/models/dotsmocr-1.8b-q8_0.gguf";
+	private static final String MODEL = "task12-test-model";
 	private static final String PROMPT = "Extract the text content from this image.";
-	private static final int MAX_TOKENS = 4096;
-	private static final double TEMPERATURE = 0.1;
-	private static final double TOP_P = 0.9;
+	private static final int MAX_TOKENS = 128;
+	private static final double TEMPERATURE = 0.7;
+	private static final double TOP_P = 0.8;
+	private static final int TOP_K = 20;
+	private static final double MIN_P = 0.0;
+	private static final double PRESENCE_PENALTY = 1.5;
+	private static final double REPEAT_PENALTY = 1.0;
 	private static final long MAX_IMAGE_BYTES = 33554432L;
 
 	private final ObjectMapper objectMapper = new ObjectMapper();
@@ -80,13 +82,28 @@ class StreamingPngChatRequestBodyTest {
 		assertEquals("text", textPart.get("type").asText());
 		assertEquals(PROMPT, textPart.get("text").asText());
 
+		// The full Qwen 3.5 8B sampling contract, emitted as JSON numbers.
 		assertEquals(TEMPERATURE, root.get("temperature").asDouble(), 0.0001);
 		assertEquals(TOP_P, root.get("top_p").asDouble(), 0.0001);
+		assertEquals(TOP_K, root.get("top_k").asInt());
+		assertEquals(MIN_P, root.get("min_p").asDouble(), 0.0001);
+		assertEquals(PRESENCE_PENALTY, root.get("presence_penalty").asDouble(), 0.0001);
+		assertEquals(REPEAT_PENALTY, root.get("repeat_penalty").asDouble(), 0.0001);
 		assertEquals(MAX_TOKENS, root.get("max_tokens").asInt());
 		assertEquals(1, root.get("n").asInt());
 		assertFalse(root.get("stream").asBoolean());
+		// Every sampling value is a JSON number, never a string.
+		assertTrue(root.get("temperature").isNumber());
+		assertTrue(root.get("top_p").isNumber());
+		assertTrue(root.get("top_k").isNumber());
+		assertTrue(root.get("min_p").isNumber());
+		assertTrue(root.get("presence_penalty").isNumber());
+		assertTrue(root.get("repeat_penalty").isNumber());
 		assertTrue(root.has("max_tokens"));
 		assertFalse(root.has("max_completion_tokens"));
+		// llama.cpp uses repeat_penalty, not repetition_penalty.
+		assertTrue(root.has("repeat_penalty"));
+		assertFalse(root.has("repetition_penalty"));
 		assertFalse(PROMPT.contains("<|img|>"));
 		assertFalse(PROMPT.contains("<|imgpad|>"));
 		assertFalse(PROMPT.contains("<|endofimg|>"));
@@ -119,7 +136,7 @@ class StreamingPngChatRequestBodyTest {
 		AtomicInteger readCount = new AtomicInteger(0);
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 				pngPath, pngBytes.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper) {
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper) {
 			@Override
 			InputStream openInputStream(Path path) throws IOException {
 				return new CountingInputStream(Files.newInputStream(path), readCount);
@@ -184,7 +201,8 @@ class StreamingPngChatRequestBodyTest {
 		Path pngPath = writePng(pngBytes);
 
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
-				pngPath, pngBytes.length, 10L, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P, this.objectMapper);
+				pngPath, pngBytes.length, 10L, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper);
 		Buffer buffer = new Buffer();
 		OcrException e = assertThrows(OcrException.class, () -> body.writeTo(buffer));
 		assertEquals(Code.OCR_IMAGE_INVALID, e.getCode());
@@ -210,7 +228,7 @@ class StreamingPngChatRequestBodyTest {
 		// Use an input stream that returns fewer bytes than expected.
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 				pngPath, pngBytes.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper) {
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper) {
 			@Override
 			InputStream openInputStream(Path path) throws IOException {
 				// Return a stream that only provides half the bytes.
@@ -240,7 +258,7 @@ class StreamingPngChatRequestBodyTest {
 
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 				pngPath, pngBytes.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper) {
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper) {
 			@Override
 			InputStream openInputStream(Path path) throws IOException {
 				return new ByteArrayInputStream(expanded);
@@ -306,7 +324,7 @@ class StreamingPngChatRequestBodyTest {
 
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 				pngPath, pngBytes.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper, failingFactory);
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper, failingFactory);
 
 		Buffer buffer = new Buffer();
 		IOException e = assertThrows(IOException.class, () -> body.writeTo(buffer));
@@ -349,7 +367,7 @@ class StreamingPngChatRequestBodyTest {
 
 		StreamingPngChatRequestBody body = new StreamingPngChatRequestBody(
 				pngPath, fullPng.length, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper, failingFactory) {
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper, failingFactory) {
 			@Override
 			InputStream openInputStream(Path path) throws IOException {
 				return new ByteArrayInputStream(truncated);
@@ -364,10 +382,6 @@ class StreamingPngChatRequestBodyTest {
 		Throwable[] suppressed = e.getSuppressed();
 		assertEquals(1, suppressed.length, "Expected exactly one suppressed exception");
 		assertSame(closeFailure, suppressed[0]);
-	}
-
-	private static long computeBase64EncodedLength(long rawLength) {
-		return (rawLength / 3) * 4 + ((rawLength % 3) == 0 ? 0 : (rawLength % 3) == 1 ? 4 : 4);
 	}
 
 	@Test
@@ -468,7 +482,7 @@ class StreamingPngChatRequestBodyTest {
 	private StreamingPngChatRequestBody newBody(Path pngPath, long expectedSize) {
 		return new StreamingPngChatRequestBody(
 				pngPath, expectedSize, MAX_IMAGE_BYTES, MODEL, PROMPT, MAX_TOKENS, TEMPERATURE, TOP_P,
-				this.objectMapper);
+				TOP_K, MIN_P, PRESENCE_PENALTY, REPEAT_PENALTY, this.objectMapper);
 	}
 
 	private static byte[] createSyntheticPng(int payloadLength) {

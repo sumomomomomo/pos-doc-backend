@@ -7,18 +7,26 @@ import horse.sumomo.pos_doc_backend.persistence.model.ExtractionField;
 /**
  * The three exact structured-extraction field prompts and their prompt version.
  *
- * <p>The structured workflow uses prompt version {@link #PROMPT_VERSION} ({@code 2});
- * version {@code 1} belongs to the old generic full-page OCR workflow. The prompts are
- * named constants defined in exactly one place and are sent verbatim — never
- * concatenated or reworded — one prompt per field per request.
+ * <p>The structured workflow uses prompt version {@link #PROMPT_VERSION} ({@code 3});
+ * version {@code 1} belongs to the old generic full-page OCR workflow, and version
+ * {@code 2} was the dots.mocr contract. This value versions the <em>complete</em>
+ * extraction contract: the prompt text, the model family, and the sampling behavior.
+ * It was incremented from {@code 2} to {@code 3} when the inference contract moved
+ * from dots.mocr to Qwen 3.5 8B (temperature 0.7, top-p 0.8, top-k 20, min-p 0.0,
+ * presence-penalty 1.5, repeat-penalty 1.0) even though the three prompt texts are
+ * unchanged. The prompts are named constants defined in exactly one place and are
+ * sent verbatim — never concatenated or reworded — one prompt per field per request.
  *
  * <p>Each prompt instructs the model to return the single value or the literal token
  * {@code UNKNOWN} when the field is absent, unreadable, or ambiguous.
  */
 public final class FieldExtractionPrompts {
 
-	/** Prompt version for the structured field-extraction workflow. */
-	public static final int PROMPT_VERSION = 2;
+	/**
+	 * Version of the complete extraction contract (prompt text + model family +
+	 * sampling behavior). Bumped from 2 to 3 for the Qwen 3.5 8B contract.
+	 */
+	public static final int PROMPT_VERSION = 3;
 
 	public static final String POLICYHOLDER_NAME =
 			"Return only the value of the Policyowner Name shown in this document. "

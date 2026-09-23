@@ -74,7 +74,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	private static final String TEST_BUCKET = "pos-documents-field-wf-test";
 	private static final DockerImageName MINIO_IMAGE =
 			DockerImageName.parse("cgr.dev/chainguard/minio:latest").asCompatibleSubstituteFor("minio/minio");
-	private static final String MODEL = "/models/dotsmocr-1.8b-q8_0.gguf";
+	private static final String MODEL = "task12-test-model";
 
 	private static MinIOContainer minio;
 	private static MinioClient adminClient;
@@ -115,6 +115,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 		registry.add("storage.minio.secret-key", minio::getPassword);
 		registry.add("storage.minio.bucket", () -> TEST_BUCKET);
 		registry.add("app.ocr.llama-cpp.server-origin", ocrStub::getServerOrigin);
+		registry.add("app.ocr.llama-cpp.model", () -> MODEL);
 
 		Path dbFile = Files.createTempFile("pos-doc-field-extract-wf-test", ".db");
 		dbFile.toFile().deleteOnExit();
@@ -223,7 +224,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 
 		// Three durable outcomes for the candidate at prompt version 2.
 		Integer outcomeCount = this.jdbc.queryForObject(
-				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND prompt_version = 2",
+				"SELECT COUNT(*) FROM pos_field_extraction WHERE document_id = ? AND prompt_version = 3",
 				Integer.class, s.documentIds().get(0).toString());
 		assertEquals(3, outcomeCount);
 
@@ -568,8 +569,8 @@ class StructuredFieldExtractionServiceIntegrationTest {
 		this.jdbc.update(
 				"INSERT INTO pos_field_extraction (document_id, field_name, prompt_version, outcome, value_text, "
 					+ "model, finish_reason, attempt_count, completed_at_epoch_ms) VALUES (?,?,?,?,?,?,?,?,?)",
-				docId.toString(), "POLICYHOLDER_NAME", 2, "RESOLVED", "Durable Winner Value",
-				"/models/dotsmocr-1.8b-q8_0.gguf", "stop", 1, System.currentTimeMillis());
+				docId.toString(), "POLICYHOLDER_NAME", 3, "RESOLVED", "Durable Winner Value",
+				MODEL, "stop", 1, System.currentTimeMillis());
 		// The stub proposes a DIFFERENT value for the policyholder.
 		ocrStub.enqueueResponse("Contender Value", 200, "application/json");
 
@@ -618,7 +619,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	@Test
 	void emptyOutputIsRetryable() throws Exception {
 		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
-		String emptyJson = "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":"
+		String emptyJson = "{\"model\":\"" + MODEL + "\",\"choices\":[{\"message\":{\"role\":"
 				+ "\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}]}";
 		ocrStub.enqueueRawResponse(emptyJson, 200, "application/json");
 		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");
@@ -633,7 +634,7 @@ class StructuredFieldExtractionServiceIntegrationTest {
 	@Test
 	void truncatedOutputIsRetryable() throws Exception {
 		Setup s = createRecord(List.of("documents/LAPPe.pdf"), null, "John Davidson", "2026-01-01");
-		String truncatedJson = "{\"model\":\"/models/dotsmocr-1.8b-q8_0.gguf\",\"choices\":[{\"message\":{\"role\":"
+		String truncatedJson = "{\"model\":\"" + MODEL + "\",\"choices\":[{\"message\":{\"role\":"
 				+ "\"assistant\",\"content\":\"26-Jul-\"},\"finish_reason\":\"length\"}]}";
 		ocrStub.enqueueRawResponse(truncatedJson, 200, "application/json");
 		ocrStub.enqueueResponse("Charlie Henry", 200, "application/json");

@@ -8,9 +8,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 /**
  * Typed, validated configuration for the local llama.cpp OCR service.
  *
- * <p>Bound from {@code app.ocr.llama-cpp.*}. The server origin, chat
- * completions path, and model ID are fixed for this deployment and must not
- * be derived from request data, document metadata, or remote responses.
+ * <p>Bound from {@code app.ocr.llama-cpp.*}. The chat completions path is fixed
+ * for this deployment and must not be derived from request data, document
+ * metadata, or remote responses. The server origin and the model ID are
+ * deployment-specific: the production server origin defaults to the LAN llama.cpp
+ * endpoint, and the model ID is supplied by the deployer (whatever llama.cpp
+ * reports as {@code data[0].id} from {@code /models}) via the {@code OCR_MODEL}
+ * environment variable. The backend never discovers its model by calling
+ * {@code /models}.
  *
  * <p>{@link #toString()} exposes only safe configuration values; there is no
  * API-key property.
@@ -25,6 +30,11 @@ public final class LlamaCppOcrProperties {
 	static final double MAX_TEMPERATURE = 2.0;
 	static final double MIN_TOP_P = 0.0;
 	static final double MAX_TOP_P = 1.0;
+	static final double MIN_MIN_P = 0.0;
+	static final double MAX_MIN_P = 1.0;
+	static final double MIN_PRESENCE_PENALTY = -2.0;
+	static final double MAX_PRESENCE_PENALTY = 2.0;
+	static final double MIN_REPEAT_PENALTY = 0.0;
 	static final int MIN_MAX_ATTEMPTS = 1;
 	static final int MAX_MAX_ATTEMPTS = 3;
 
@@ -40,6 +50,10 @@ public final class LlamaCppOcrProperties {
 	private final int maxTokens;
 	private final double temperature;
 	private final double topP;
+	private final int topK;
+	private final double minP;
+	private final double presencePenalty;
+	private final double repeatPenalty;
 	private final int maxConcurrentRequests;
 	private final int maxAttempts;
 	private final long retryBackoffMs;
@@ -47,6 +61,7 @@ public final class LlamaCppOcrProperties {
 	public LlamaCppOcrProperties(String serverOrigin, String chatCompletionsPath, String model,
 			Duration connectTimeout, Duration readTimeout, Duration callTimeout, long maxImageBytes,
 			long maxResponseBytes, int maxOcrCharacters, int maxTokens, double temperature, double topP,
+			int topK, double minP, double presencePenalty, double repeatPenalty,
 			int maxConcurrentRequests, int maxAttempts, long retryBackoffMs) {
 		if (isBlank(serverOrigin)) {
 			throw new IllegalArgumentException("app.ocr.llama-cpp.server-origin must not be blank");
@@ -124,13 +139,43 @@ public final class LlamaCppOcrProperties {
 			throw new IllegalArgumentException(
 					"app.ocr.llama-cpp.max-tokens must be within [" + MIN_MAX_TOKENS + ", " + MAX_MAX_TOKENS + "]");
 		}
+		if (!isFinite(temperature)) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.temperature must be finite");
+		}
 		if (temperature < MIN_TEMPERATURE || temperature > MAX_TEMPERATURE) {
 			throw new IllegalArgumentException(
 					"app.ocr.llama-cpp.temperature must be within [" + MIN_TEMPERATURE + ", " + MAX_TEMPERATURE + "]");
 		}
+		if (!isFinite(topP)) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.top-p must be finite");
+		}
 		if (topP <= MIN_TOP_P || topP > MAX_TOP_P) {
 			throw new IllegalArgumentException(
 					"app.ocr.llama-cpp.top-p must be within (" + MIN_TOP_P + ", " + MAX_TOP_P + "]");
+		}
+		if (topK < 0) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.top-k must be non-negative");
+		}
+		if (!isFinite(minP)) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.min-p must be finite");
+		}
+		if (minP < MIN_MIN_P || minP > MAX_MIN_P) {
+			throw new IllegalArgumentException(
+					"app.ocr.llama-cpp.min-p must be within [" + MIN_MIN_P + ", " + MAX_MIN_P + "]");
+		}
+		if (!isFinite(presencePenalty)) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.presence-penalty must be finite");
+		}
+		if (presencePenalty < MIN_PRESENCE_PENALTY || presencePenalty > MAX_PRESENCE_PENALTY) {
+			throw new IllegalArgumentException(
+					"app.ocr.llama-cpp.presence-penalty must be within [" + MIN_PRESENCE_PENALTY + ", "
+						+ MAX_PRESENCE_PENALTY + "]");
+		}
+		if (!isFinite(repeatPenalty)) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.repeat-penalty must be finite");
+		}
+		if (repeatPenalty <= MIN_REPEAT_PENALTY) {
+			throw new IllegalArgumentException("app.ocr.llama-cpp.repeat-penalty must be > 0");
 		}
 		if (maxConcurrentRequests != 1) {
 			throw new IllegalArgumentException(
@@ -156,6 +201,10 @@ public final class LlamaCppOcrProperties {
 		this.maxTokens = maxTokens;
 		this.temperature = temperature;
 		this.topP = topP;
+		this.topK = topK;
+		this.minP = minP;
+		this.presencePenalty = presencePenalty;
+		this.repeatPenalty = repeatPenalty;
 		this.maxConcurrentRequests = maxConcurrentRequests;
 		this.maxAttempts = maxAttempts;
 		this.retryBackoffMs = retryBackoffMs;
@@ -224,6 +273,22 @@ public final class LlamaCppOcrProperties {
 		return this.topP;
 	}
 
+	public int topK() {
+		return this.topK;
+	}
+
+	public double minP() {
+		return this.minP;
+	}
+
+	public double presencePenalty() {
+		return this.presencePenalty;
+	}
+
+	public double repeatPenalty() {
+		return this.repeatPenalty;
+	}
+
 	public int maxConcurrentRequests() {
 		return this.maxConcurrentRequests;
 	}
@@ -234,6 +299,10 @@ public final class LlamaCppOcrProperties {
 
 	public long retryBackoffMs() {
 		return this.retryBackoffMs;
+	}
+
+	private static boolean isFinite(double value) {
+		return !Double.isNaN(value) && !Double.isInfinite(value);
 	}
 
 	private static boolean isBlank(String value) {
@@ -254,6 +323,10 @@ public final class LlamaCppOcrProperties {
 				+ ", maxTokens=" + this.maxTokens
 				+ ", temperature=" + this.temperature
 				+ ", topP=" + this.topP
+				+ ", topK=" + this.topK
+				+ ", minP=" + this.minP
+				+ ", presencePenalty=" + this.presencePenalty
+				+ ", repeatPenalty=" + this.repeatPenalty
 				+ ", maxConcurrentRequests=" + this.maxConcurrentRequests
 			+ ", maxAttempts=" + this.maxAttempts + ", retryBackoffMs=" + this.retryBackoffMs + "]";
 	}

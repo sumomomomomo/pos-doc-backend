@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class OcrHttpStub implements AutoCloseable {
 
-	private static final String MODEL = "/models/dotsmocr-1.8b-q8_0.gguf";
+	public static final String MODEL = "task12-test-model";
 	private static final String SYNTHETIC_OCR_TEXT = "SYNTHETIC OCR TEXT";
 	private static final long MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 

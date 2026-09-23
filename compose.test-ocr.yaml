@@ -32,7 +32,11 @@ services:
 
   backend:
     environment:
-      # Override the OCR server origin to point at the test stub.
-      # Spring Boot's relaxed binding maps APP_OCR_LLAMA_CPP_SERVER_ORIGIN
-      # to app.ocr.llama-cpp.server-origin.
-      APP_OCR_LLAMA_CPP_SERVER_ORIGIN: http://ocr-stub:8080
+      # Override the OCR server origin to point at the test stub and set an
+      # explicit synthetic test model ID. Both are consumed by the
+      # application.yaml placeholders (${OCR_SERVER_ORIGIN:...} and
+      # ${OCR_MODEL:...}). The WireMock stub returns this exact model ID in
+      # every response, and the request-body mappings require the full Qwen
+      # sampling contract.
+      OCR_SERVER_ORIGIN: http://ocr-stub:8080
+      OCR_MODEL: task12-test-model

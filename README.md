@@ -134,9 +134,12 @@ re-adds only the one port the reverse proxy needs and pins the security mode:
 - `stack-test` authentication is never enabled in production (the override pins
   `APP_SECURITY_MODE=google`, an empty stack-test token, and an empty
   `SPRING_PROFILES_ACTIVE`).
-- The OCR service (`192.168.1.34:8080`) is an internal backend-to-backend
-  dependency and must **not** be exposed through Nginx (enforced in the frontend
-  repository's Nginx configuration).
+- The OCR service is an internal backend-to-backend dependency and must **not**
+  be exposed through Nginx (enforced in the frontend repository's Nginx
+  configuration). Production OCR uses **Qwen 3.5 8B** served by llama.cpp. The
+  endpoint is configured by `OCR_SERVER_ORIGIN` (default
+  `http://192.168.1.34:8080`) and the exact loaded model ID by `OCR_MODEL`
+  (required in production — it has no default and is a deployment value).
 
 ## Ingestion behavior
 
@@ -168,7 +171,9 @@ This replaces the old "OCR every PDF" workflow:
   and reused across that candidate's fields.
 - **Three structured calls** — one HTTP request per unresolved field (policyholder
   name, consultant name, submission date), each sent with its own exact prompt
-  (prompt version 2). The calls are deterministic: temperature `0`, `max_tokens` `128`.
+  (prompt version 3). Every request sends the Qwen 3.5 8B sampling contract:
+  `temperature` `0.7`, `top_p` `0.8`, `top_k` `20`, `min_p` `0.0`,
+  `presence_penalty` `1.5`, `repeat_penalty` `1.0`, `max_tokens` `128`.
 - **Bounded per-field retry** — each field gets up to 3 attempts (1 + 2 retries)
   with a short bounded back-off before a terminal outcome is recorded. Malformed,
   empty, or truncated model responses are retried within the field.

@@ -49,17 +49,24 @@ class StreamingPngChatRequestBody extends RequestBody {
 	private final int maxTokens;
 	private final double temperature;
 	private final double topP;
+	private final int topK;
+	private final double minP;
+	private final double presencePenalty;
+	private final double repeatPenalty;
 	private final ObjectMapper objectMapper;
 	private final Base64OutputStreamFactory base64Factory;
 
 	StreamingPngChatRequestBody(Path pngPath, long expectedPngByteSize, long maxImageBytes, String model,
-			String prompt, int maxTokens, double temperature, double topP, ObjectMapper objectMapper) {
-		this(pngPath, expectedPngByteSize, maxImageBytes, model, prompt, maxTokens, temperature, topP,
-				objectMapper, StreamingPngChatRequestBody::defaultBase64Wrap);
+			String prompt, int maxTokens, double temperature, double topP, int topK, double minP,
+			double presencePenalty, double repeatPenalty, ObjectMapper objectMapper) {
+		this(pngPath, expectedPngByteSize, maxImageBytes, model, prompt, maxTokens, temperature, topP, topK,
+				minP, presencePenalty, repeatPenalty, objectMapper,
+				StreamingPngChatRequestBody::defaultBase64Wrap);
 	}
 
 	StreamingPngChatRequestBody(Path pngPath, long expectedPngByteSize, long maxImageBytes, String model,
-			String prompt, int maxTokens, double temperature, double topP, ObjectMapper objectMapper,
+			String prompt, int maxTokens, double temperature, double topP, int topK, double minP,
+			double presencePenalty, double repeatPenalty, ObjectMapper objectMapper,
 			Base64OutputStreamFactory base64Factory) {
 		if (pngPath == null) {
 			throw new IllegalArgumentException("pngPath must not be null");
@@ -84,6 +91,10 @@ class StreamingPngChatRequestBody extends RequestBody {
 		this.maxTokens = maxTokens;
 		this.temperature = temperature;
 		this.topP = topP;
+		this.topK = topK;
+		this.minP = minP;
+		this.presencePenalty = presencePenalty;
+		this.repeatPenalty = repeatPenalty;
 		this.objectMapper = objectMapper;
 		this.base64Factory = base64Factory;
 	}
@@ -285,6 +296,14 @@ class StreamingPngChatRequestBody extends RequestBody {
 			w.write(Double.toString(this.temperature));
 			w.write(",\"top_p\":");
 			w.write(Double.toString(this.topP));
+			w.write(",\"top_k\":");
+			w.write(Integer.toString(this.topK));
+			w.write(",\"min_p\":");
+			w.write(Double.toString(this.minP));
+			w.write(",\"presence_penalty\":");
+			w.write(Double.toString(this.presencePenalty));
+			w.write(",\"repeat_penalty\":");
+			w.write(Double.toString(this.repeatPenalty));
 			w.write(",\"max_tokens\":");
 			w.write(Integer.toString(this.maxTokens));
 			w.write(",\"n\":1,\"stream\":false}");
