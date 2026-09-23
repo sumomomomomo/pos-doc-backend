@@ -98,6 +98,54 @@ class ZipArchiveValidatorTest {
 	}
 
 	// ------------------------------------------------------------------
+	// wrapped (Java-serialized byte[]) PDF entries
+	// ------------------------------------------------------------------
+
+	@Test
+	void zipWithOnlyRawPdfsRemainsValid() throws Exception {
+		writeZip(Map.of("a.pdf", PDF, "b.pdf", PDF));
+		ValidatedArchive result = new ZipArchiveValidator(DEFAULTS).validate(this.spooledFile, fileBytes());
+		assertEquals(2, result.pdfCount());
+		assertEquals(2L * PDF.length, result.totalUncompressedBytes());
+	}
+
+	@Test
+	void zipWithOneRawAndTwoWrappedPdfsIsValid() throws Exception {
+		Map<String, byte[]> entries = new LinkedHashMap<>();
+		entries.put("documents/raw.pdf", PDF);
+		entries.put("documents/wrapped1.pdf", serialize(PDF));
+		entries.put("documents/wrapped2.pdf", serialize(PDF));
+		writeZip(entries);
+		ValidatedArchive result = new ZipArchiveValidator(DEFAULTS).validate(this.spooledFile, fileBytes());
+		assertEquals(3, result.pdfCount());
+	}
+
+	@Test
+	void uncompressedTotalsCountThe27ByteWrappers() throws Exception {
+		Map<String, byte[]> entries = new LinkedHashMap<>();
+		entries.put("documents/raw.pdf", PDF);
+		entries.put("documents/wrapped.pdf", serialize(PDF));
+		writeZip(entries);
+		ValidatedArchive result = new ZipArchiveValidator(DEFAULTS).validate(this.spooledFile, fileBytes());
+		// raw contributes PDF.length; wrapped contributes 27 + PDF.length.
+		assertEquals(PDF.length + (27 + PDF.length), result.totalUncompressedBytes());
+	}
+
+	@Test
+	void malformedWrappedEntryRejectsTheEntireZip() throws Exception {
+		// A wrapped entry whose declared length is one short of the actual
+		// payload leaves a trailing byte and must reject the whole archive.
+		byte[] badWrapped = envelope(prefix23(), PDF.length - 1, PDF);
+		Map<String, byte[]> entries = new LinkedHashMap<>();
+		entries.put("documents/raw.pdf", PDF);
+		entries.put("documents/bad.pdf", badWrapped);
+		writeZip(entries);
+		ArchiveValidationException e = assertThrows(ArchiveValidationException.class,
+				() -> new ZipArchiveValidator(DEFAULTS).validate(this.spooledFile, fileBytes()));
+		assertEquals(ArchiveValidationException.Category.INVALID_ARCHIVE, e.getCategory());
+	}
+
+	// ------------------------------------------------------------------
 	// structural rejections
 	// ------------------------------------------------------------------
 
@@ -594,6 +642,33 @@ class ZipArchiveValidatorTest {
 		out.writeBytes(prefix);
 		out.writeBytes(rest);
 		return out.toByteArray();
+	}
+
+	/** Builds a strict Java-serialized {@code byte[]} envelope (test input only). */
+	private static byte[] serialize(byte[] pdfBytes) {
+		ByteArrayOutputStream bos = new ByteArrayOutputStream();
+		try (java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(bos)) {
+			oos.writeObject(pdfBytes);
+		}
+		catch (IOException e) {
+			throw new java.io.UncheckedIOException(e);
+		}
+		return bos.toByteArray();
+	}
+
+	private static byte[] prefix23() {
+		return java.util.Arrays.copyOf(serialize(PDF), 23);
+	}
+
+	private static byte[] envelope(byte[] prefix, int declaredLength, byte[] payload) {
+		ByteArrayOutputStream bos = new ByteArrayOutputStream();
+		bos.writeBytes(prefix);
+		bos.write((declaredLength >>> 24) & 0xFF);
+		bos.write((declaredLength >>> 16) & 0xFF);
+		bos.write((declaredLength >>> 8) & 0xFF);
+		bos.write(declaredLength & 0xFF);
+		bos.writeBytes(payload);
+		return bos.toByteArray();
 	}
 
 	/**

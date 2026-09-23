@@ -237,6 +237,36 @@ class ArchiveExtractionServiceCompensationTest {
 		verify(this.storage, never()).delete(anyString());
 	}
 
+	@Test
+	void wrappedEntryUploadFailureCompensatesOnlyNewlyCreatedObject() throws Exception {
+		UUID posRecordId = UUID.randomUUID();
+		byte[] wrappedPdf = ("%PDF-1.4\n% Wrapped doc\n%%EOF\n").getBytes();
+		Map<String, byte[]> entries = new LinkedHashMap<>();
+		entries.put("first.pdf", PDF_A);                     // raw
+		entries.put("second.pdf", serialize(wrappedPdf));    // wrapped
+		Path zip = writeZip(entries);
+
+		UUID firstDocId = DocumentIdentityDeriver.deriveDocumentId(posRecordId, 0);
+		UUID secondDocId = DocumentIdentityDeriver.deriveDocumentId(posRecordId, 1);
+		String firstKey = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, firstDocId);
+		String secondKey = DocumentIdentityDeriver.buildDocumentObjectKey(posRecordId, secondDocId);
+
+		when(this.storage.exists(firstKey)).thenReturn(false);
+		when(this.storage.exists(secondKey)).thenReturn(false);
+		doThrow(new ObjectStorageException("simulated failure on second upload"))
+				.when(this.storage).put(eq(secondKey), any(InputStream.class), anyLong(), anyString());
+
+		assertThrows(ConsumerException.class,
+				() -> this.service.extractAndStore(zip, Files.size(zip), posRecordId));
+
+		// The first (raw) upload succeeded; the second (wrapped) upload failed.
+		// Compensation deletes only the first (newly created) key.
+		verify(this.storage, times(1)).put(eq(firstKey), any(InputStream.class), anyLong(), anyString());
+		verify(this.storage, times(1)).put(eq(secondKey), any(InputStream.class), anyLong(), anyString());
+		verify(this.storage, times(1)).delete(firstKey);
+		verify(this.storage, never()).delete(secondKey);
+	}
+
 	private static Path writeZip(Map<String, byte[]> entries) throws Exception {
 		ByteArrayOutputStream baos = new ByteArrayOutputStream();
 		try (ZipOutputStream zip = new ZipOutputStream(baos)) {
@@ -266,6 +296,17 @@ class ArchiveExtractionServiceCompensationTest {
 		catch (Exception e) {
 			throw new AssertionError(e);
 		}
+	}
+
+	private static byte[] serialize(byte[] pdfBytes) {
+		ByteArrayOutputStream bos = new ByteArrayOutputStream();
+		try (java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(bos)) {
+			oos.writeObject(pdfBytes);
+		}
+		catch (java.io.IOException e) {
+			throw new java.io.UncheckedIOException(e);
+		}
+		return bos.toByteArray();
 	}
 
 	// Sanity helpers for the JUnit assertion surface used in this file.
