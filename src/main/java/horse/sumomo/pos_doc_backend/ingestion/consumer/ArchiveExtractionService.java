@@ -19,6 +19,7 @@ import java.util.zip.ZipFile;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
@@ -46,10 +47,12 @@ import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
  *       document fields.</li>
  *   <li>Decode the entry through the shared {@link PdfEntryDecoder} (a raw
  *       PDF, or a strict Java-serialized {@code byte[]}) into a unique temp
- *       PDF, computing SHA-256 over the <em>normalized</em> PDF bytes and
- *       enforcing the per-entry limit, the cumulative expanded-byte limit,
- *       and the compression-ratio limit using the raw uncompressed entry
- *       bytes (including the 27-byte wrapper for the serialized form).</li>
+ *       PDF, computing SHA-256 over the <em>normalized</em> PDF bytes. The
+ *       per-entry limit, the cumulative expanded-byte limit, and the
+ *       compression-ratio limit are enforced <em>during</em> the read against
+ *       the remaining effective raw-byte allowance (reusing the validator's
+ *       pre-entry arithmetic), using the raw uncompressed entry bytes
+ *       (including the 27-byte wrapper for the serialized form).</li>
  *   <li>Re-validate that the temp file begins with {@code %PDF-} (byte zero
  *       of the normalized PDF).</li>
  *   <li>Upload the normalized temp PDF with {@code application/pdf} and its
@@ -76,12 +79,23 @@ public class ArchiveExtractionService {
 	private final MinioObjectStorage storage;
 	private final UploadLimitsProperties limits;
 
+	@Autowired
 	public ArchiveExtractionService(ZipArchiveValidator validator, MinioObjectStorage storage,
 			UploadLimitsProperties limits) {
+		this(validator, storage, limits, new PdfEntryDecoder());
+	}
+
+	/**
+	 * Overload that lets a caller supply a custom {@link PdfEntryDecoder}
+	 * (e.g. a recording double in tests). Production wiring uses the
+	 * three-argument overload.
+	 */
+	public ArchiveExtractionService(ZipArchiveValidator validator, MinioObjectStorage storage,
+			UploadLimitsProperties limits, PdfEntryDecoder decoder) {
 		this.validator = Objects.requireNonNull(validator, "validator must not be null");
 		this.storage = Objects.requireNonNull(storage, "storage must not be null");
 		this.limits = Objects.requireNonNull(limits, "limits must not be null");
-		this.decoder = new PdfEntryDecoder();
+		this.decoder = Objects.requireNonNull(decoder, "decoder must not be null");
 	}
 
 	/**
@@ -280,11 +294,21 @@ public class ArchiveExtractionService {
 				StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
 				DigestOutputStream out = new DigestOutputStream(fileOut, digest)) {
 			try {
-				result = this.decoder.decode(in, out, this.limits.maxEntryBytes());
+				// Enforce the *remaining* effective raw-byte allowance — the
+				// minimum of the per-entry cap, the remaining total-uncompressed
+				// budget, and the remaining compression-ratio budget — during
+				// streaming, mirroring the validator's pre-entry arithmetic. An
+				// entry that would breach a cumulative limit is therefore
+				// rejected at the first over-limit chunk, not after the whole
+				// entry has been written to the temp file.
+				long effectiveRawAllowance = this.validator.effectiveEntryLimit(cumulativeExpandedBefore,
+						sourceByteCount);
+				result = this.decoder.decode(in, out, effectiveRawAllowance);
 			}
 			catch (ArchiveValidationException e) {
-				// A malformed or unrecognized entry is a permanent
-				// source-archive failure, not a transient one.
+				// A malformed or unrecognized entry (or an exhausted cumulative
+				// budget) is a permanent source-archive failure, not a transient
+				// one.
 				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID, e);
 			}
 		}
@@ -295,12 +319,14 @@ public class ArchiveExtractionService {
 		long sourceEntryBytes = result.sourceBytesRead();
 		long normalizedBytes = result.pdfBytesWritten();
 
-		// Security limits use the RAW uncompressed entry bytes (including the
-		// 27-byte wrapper for the serialized form).
+		// Defense-in-depth post-stream assertions. The decoder already enforced
+		// the effective allowance during the read (above), so these should only
+		// ever trip on a logic bug; they are kept so a future refactor cannot
+		// silently relax the caps. Raw bytes include the 27-byte wrapper for the
+		// serialized form.
 		if (cumulativeExpandedBefore + sourceEntryBytes > this.limits.maxUncompressedBytes()) {
 			throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
 		}
-		// Effective compression ratio: raw entry bytes vs compressed source.
 		if (sourceByteCount > 0L) {
 			long totalExpanded = cumulativeExpandedBefore + sourceEntryBytes;
 			long observedRatio = (totalExpanded + sourceByteCount - 1L) / sourceByteCount; // ceil division

@@ -75,7 +75,53 @@ artifacts. The wrapper bytes never leak into any stored document.
 
 ## Verification
 
-- `./mvnw -o clean verify` (twice) — full suite green.
+- `./mvnw -o clean verify` (twice) — full suite green (768 tests after the
+  review fixes).
 - `docker compose --env-file .env.example config --quiet` — exit 0.
+- `scripts/verify-container-stack.sh` — **ALL CHECKS PASSED** (full compose
+  stack: health, OCR via WireMock, SQLite/MinIO persistence, idempotency,
+  content endpoints, soft delete).
 - No CI/GitHub Actions added. No credentials or real subject IDs in tracked
   files.
+
+## Review fixes (post-first-commit)
+
+### 1. Enforce cumulative limits *during* streaming in extraction
+`ArchiveExtractionService` previously passed only `maxEntryBytes()` to the
+decoder and checked the total/ratio limits only after the entry was written to
+the temp file. Now, before decoding each entry, it computes the **remaining
+effective raw-byte allowance** by reusing the validator's pre-entry arithmetic
+(`ZipArchiveValidator.effectiveEntryLimit`, now `public` — single source of
+truth: min of per-entry cap, remaining total-uncompressed, remaining
+compression-ratio). That allowance is passed to `PdfEntryDecoder.decode()`, so
+an entry that would breach a cumulative limit is rejected at the first
+over-limit chunk, not after the whole entry hits the temp file. The post-stream
+total/ratio checks are retained as defense-in-depth.
+
+`ZipArchiveValidator.effectiveEntryLimit` was made `public` (widening
+visibility only) so both the validator and the extraction service share the
+exact same arithmetic.
+
+New `ArchiveExtractionServiceEffectiveAllowanceTest` (mocked storage + a
+`RecordingPdfEntryDecoder`) proves the service passes the *remaining* total and
+the *remaining* ratio allowance to the decoder for a later entry (strictly
+below `maxEntryBytes`), not just the static per-entry cap. `PdfEntryDecoder` is
+de-finalized so the recording double can extend it (consistent with the
+`LlamaCppOcrClient` test double). The extra 4-arg `ArchiveExtractionService`
+constructor (decoder-injectable) is used only by tests; the production
+3-arg constructor is `@Autowired`.
+
+### 2. End-to-end test now goes through the public upload/intake path
+`WrappedPdfEndToEndIntegrationTest` no longer inserts the ZIP into MinIO and
+the rows by hand. It now submits the ZIP through the `/pos-records` upload
+endpoint (MockMvc → `PosArchiveIntakeService` → `ZipArchiveValidator` — the
+path that originally rejected the wrapped form), then publishes the outbox event
+via the real `OutboxRelay` and lets the real consumer process it. It verifies
+both preservation (the archive object is byte-for-byte the upload and still
+carries the wrappers) and processing (candidate COMPLETED, non-candidates
+SKIPPED, normalized objects, PDFBox-loadable candidate, record REVIEW_REQUIRED).
+
+### Minor cleanup
+- Decoder comment: byte `0x78` is `TC_ENDBLOCKDATA` and byte `0x70` is `TC_NULL`
+  (was mislabeled `classDescEnd` / `TC_BLOCKDATALONG`).
+- `ENVELOPE_PREFIX_LEN` is now used: `ENVELOPE_HEADER_LEN = ENVELOPE_PREFIX_LEN + 4`.

@@ -182,8 +182,10 @@ public class ZipArchiveValidator {
 	 *       archive is rejected immediately.</li>
 	 * </ol>
 	 *
-	 * <p>Package-visible for unit-test verification of the pre-entry
-	 * arithmetic.
+	 * <p>Public so {@code ArchiveExtractionService} reuses this exact
+	 * pre-entry arithmetic when streaming an entry (single source of truth for
+	 * the per-entry / total / ratio allowance), and for unit-test verification
+	 * of the pre-entry arithmetic.
 	 *
 	 * @param totalUncompressedBeforeEntry bytes already produced by previous
 	 *            entries (>= 0)
@@ -193,7 +195,7 @@ public class ZipArchiveValidator {
 	 * @throws ArchiveValidationException when any remaining allowance is
 	 *             zero or negative
 	 */
-	long effectiveEntryLimit(long totalUncompressedBeforeEntry, long archiveCompressedBytes) {
+	public long effectiveEntryLimit(long totalUncompressedBeforeEntry, long archiveCompressedBytes) {
 		if (totalUncompressedBeforeEntry < 0) {
 			throw new IllegalArgumentException("totalUncompressedBeforeEntry must be >= 0");
 		}

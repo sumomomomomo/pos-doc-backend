@@ -37,7 +37,7 @@ import java.util.Arrays;
  * hand — it does <strong>not</strong> use {@code ObjectInputStream}, Java
  * deserialization, reflection, or a general serialization library.
  */
-public final class PdfEntryDecoder {
+public class PdfEntryDecoder {
 
 	/** The two accepted PDF-entry encodings. */
 	public enum Encoding {
@@ -67,13 +67,13 @@ public final class PdfEntryDecoder {
 	private static final int BUFFER_SIZE = 8192;
 	private static final int PDF_MAGIC_LEN = 5;
 	private static final int ENVELOPE_PREFIX_LEN = 23;
-	private static final int ENVELOPE_HEADER_LEN = 27; // 23-byte prefix + 4-byte length
+	private static final int ENVELOPE_HEADER_LEN = ENVELOPE_PREFIX_LEN + 4; // 23-byte prefix + 4-byte length
 
 	private static final byte[] PDF_MAGIC = {'%', 'P', 'D', 'F', '-'};
 	// The exact 23-byte prefix of a Java-serialized byte[]: stream magic
 	// (ACED0005), TC_ARRAY (75), TC_CLASSDESC (72), class name len 2 + "[B"
 	// (00 02 5B 42), 8-byte class UID, classDescFlags (02), zero field count
-	// (00 00), classDescEnd (78), TC_BLOCKDATALONG (70). The 4-byte signed
+	// (00 00), TC_ENDBLOCKDATA (78), TC_NULL (70). The 4-byte signed
 	// big-endian array length immediately follows (bytes 23..26); the payload
 	// starts at byte 27.
 	private static final byte[] ENVELOPE_PREFIX = {
