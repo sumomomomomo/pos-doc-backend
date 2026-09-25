@@ -2,6 +2,7 @@ package horse.sumomo.pos_doc_backend.ingestion.archive;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -36,7 +37,10 @@ import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
  *       fails because it contains no PDFs.</li>
  *   <li>Between 1 and the configured maximum of non-directory entries.</li>
  *   <li>Every non-directory entry must have a case-insensitive {@code .pdf}
- *       suffix and begin with the bytes {@code %PDF-}.</li>
+ *       suffix and be a decodable PDF: either raw bytes beginning at offset
+ *       {@code 0} with {@code %PDF-}, or a strict Java-serialized
+ *       {@code byte[]} (27-byte envelope) whose payload begins with
+ *       {@code %PDF-}. See {@link PdfEntryDecoder}.</li>
  *   <li>Entry paths are normalized ({@code \} to {@code /}) and must not be
  *       absolute, Windows drive-prefixed, or contain empty, {@code .}, or
  *       {@code ..} segments.</li>
@@ -63,9 +67,9 @@ public class ZipArchiveValidator {
 
 	// Package-visible so the unit test can pin the bounded-buffer chunk size
 	// when proving the per-entry read stops at the first limit-breaking chunk.
+	// Must match {@link PdfEntryDecoder}'s read-chunk size.
 	static final int BUFFER_SIZE = 8192;
 	private static final int SIGNATURE_LEN = 4;
-	private static final int PDF_MAGIC_LEN = 5;
 	private static final String PDF_SUFFIX = ".pdf";
 
 	private static final byte[] SIG_LOCAL_HEADER = {'P', 'K', 0x03, 0x04};
@@ -178,8 +182,10 @@ public class ZipArchiveValidator {
 	 *       archive is rejected immediately.</li>
 	 * </ol>
 	 *
-	 * <p>Package-visible for unit-test verification of the pre-entry
-	 * arithmetic.
+	 * <p>Public so {@code ArchiveExtractionService} reuses this exact
+	 * pre-entry arithmetic when streaming an entry (single source of truth for
+	 * the per-entry / total / ratio allowance), and for unit-test verification
+	 * of the pre-entry arithmetic.
 	 *
 	 * @param totalUncompressedBeforeEntry bytes already produced by previous
 	 *            entries (>= 0)
@@ -189,7 +195,7 @@ public class ZipArchiveValidator {
 	 * @throws ArchiveValidationException when any remaining allowance is
 	 *             zero or negative
 	 */
-	long effectiveEntryLimit(long totalUncompressedBeforeEntry, long archiveCompressedBytes) {
+	public long effectiveEntryLimit(long totalUncompressedBeforeEntry, long archiveCompressedBytes) {
 		if (totalUncompressedBeforeEntry < 0) {
 			throw new IllegalArgumentException("totalUncompressedBeforeEntry must be >= 0");
 		}
@@ -323,57 +329,21 @@ public class ZipArchiveValidator {
 	}
 
 	/**
-	 * Reads a PDF entry body from {@code in} through a bounded buffer,
-	 * enforcing the {@code %PDF-} signature and the per-entry limit on every
-	 * chunk read. Package-visible and stream-oriented so the unit test can
-	 * wrap a counting stream and prove the read stops at the first
-	 * limit-breaking chunk.
+	 * Reads and validates a PDF entry body from {@code in} through the shared
+	 * {@link PdfEntryDecoder}, enforcing the per-entry limit on the raw
+	 * uncompressed entry bytes (including the 27-byte envelope for the
+	 * serialized form). Package-visible and stream-oriented so the unit test
+	 * can wrap a counting stream and prove the read stops at the first
+	 * limit-breaking chunk. Intake validation must not persist a normalized
+	 * copy, so the decoder's normalized output is discarded.
 	 *
 	 * @param in the uncompressed entry stream
 	 * @param maxEntryBytes the per-entry uncompressed byte limit
-	 * @return the number of uncompressed bytes read (<= maxEntryBytes)
+	 * @return the number of raw uncompressed bytes read (<= maxEntryBytes)
 	 * @throws IOException when the underlying stream fails
 	 */
 	static long readAndValidatePdf(InputStream in, long maxEntryBytes) throws IOException {
-		long bytesRead = 0L;
-		byte[] magic = new byte[PDF_MAGIC_LEN];
-		byte[] buffer = new byte[BUFFER_SIZE];
-
-		int magicRead = 0;
-		while (magicRead < PDF_MAGIC_LEN) {
-			int r = in.read(magic, magicRead, PDF_MAGIC_LEN - magicRead);
-			if (r == -1) {
-				throw invalid("PDF entry is missing its signature bytes");
-			}
-			magicRead += r;
-		}
-		if (!startsWithPdfMagic(magic)) {
-			throw invalid("archive entry does not begin with the PDF signature");
-		}
-		bytesRead += magicRead;
-		// The effective per-entry cap may be smaller than the 5-byte
-		// %PDF- magic itself (e.g. when the remaining-total or
-		// remaining-ratio allowance is below 5). Reject immediately so
-		// the magic read cannot itself exceed the cap; no body bytes
-		// are read on this path.
-		if (bytesRead > maxEntryBytes) {
-			throw invalid("archive entry exceeds the effective size limit");
-		}
-
-		int read;
-		while ((read = in.read(buffer)) != -1) {
-			bytesRead += read;
-			if (bytesRead > maxEntryBytes) {
-				// Stop at the first chunk that pushes this entry over its
-				// per-entry limit; do not keep inflating the bomb.
-				throw invalid("archive entry exceeds the per-entry size limit");
-			}
-		}
-		return bytesRead;
-	}
-
-	private static boolean startsWithPdfMagic(byte[] magic) {
-		return magic[0] == '%' && magic[1] == 'P' && magic[2] == 'D' && magic[3] == 'F' && magic[4] == '-';
+		return new PdfEntryDecoder().decode(in, OutputStream.nullOutputStream(), maxEntryBytes).sourceBytesRead();
 	}
 
 	private static boolean equalsHeader(byte[] actual, byte[] expected) {

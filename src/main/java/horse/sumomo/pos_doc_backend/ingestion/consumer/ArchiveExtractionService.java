@@ -2,9 +2,11 @@ package horse.sumomo.pos_doc_backend.ingestion.consumer;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -17,10 +19,12 @@ import java.util.zip.ZipFile;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import horse.sumomo.pos_doc_backend.ingestion.api.UploadLimitsProperties;
 import horse.sumomo.pos_doc_backend.ingestion.archive.ArchiveValidationException;
+import horse.sumomo.pos_doc_backend.ingestion.archive.PdfEntryDecoder;
 import horse.sumomo.pos_doc_backend.ingestion.archive.ValidatedArchive;
 import horse.sumomo.pos_doc_backend.ingestion.archive.ZipArchiveValidator;
 import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
@@ -41,13 +45,19 @@ import horse.sumomo.pos_doc_backend.infrastructure.minio.MinioObjectStorage;
  *       verified immutable source archive. The persistence step then
  *       reconciles against the new bytes via the immutable storage /
  *       document fields.</li>
- *   <li>Stream the entry to a unique temp PDF, computing SHA-256, and
- *       enforcing the per-entry limit, the cumulative expanded-byte
- *       limit, and the effective compression-ratio limit using bytes
- *       actually read.</li>
- *   <li>Validate the {@code %PDF-} magic and exact byte count.</li>
- *   <li>Upload the temp PDF with {@code application/pdf} and the known
- *       size, overwriting any object already at the deterministic key.</li>
+ *   <li>Decode the entry through the shared {@link PdfEntryDecoder} (a raw
+ *       PDF, or a strict Java-serialized {@code byte[]}) into a unique temp
+ *       PDF, computing SHA-256 over the <em>normalized</em> PDF bytes. The
+ *       per-entry limit, the cumulative expanded-byte limit, and the
+ *       compression-ratio limit are enforced <em>during</em> the read against
+ *       the remaining effective raw-byte allowance (reusing the validator's
+ *       pre-entry arithmetic), using the raw uncompressed entry bytes
+ *       (including the 27-byte wrapper for the serialized form).</li>
+ *   <li>Re-validate that the temp file begins with {@code %PDF-} (byte zero
+ *       of the normalized PDF).</li>
+ *   <li>Upload the normalized temp PDF with {@code application/pdf} and its
+ *       normalized size, overwriting any object already at the deterministic
+ *       key.</li>
  *   <li>Delete the temp PDF before processing the next entry.</li>
  * </ol>
  *
@@ -59,21 +69,33 @@ public class ArchiveExtractionService {
 
 	private static final Logger log = LoggerFactory.getLogger(ArchiveExtractionService.class);
 
-	private static final int BUFFER_SIZE = 8192;
 	private static final int PDF_MAGIC_LEN = 5;
 	private static final String PDF_CONTENT_TYPE = "application/pdf";
 	private static final String TEMP_PREFIX = "pos-doc-consumer-pdf-";
 	private static final String TEMP_SUFFIX = ".part";
 
 	private final ZipArchiveValidator validator;
+	private final PdfEntryDecoder decoder;
 	private final MinioObjectStorage storage;
 	private final UploadLimitsProperties limits;
 
+	@Autowired
 	public ArchiveExtractionService(ZipArchiveValidator validator, MinioObjectStorage storage,
 			UploadLimitsProperties limits) {
+		this(validator, storage, limits, new PdfEntryDecoder());
+	}
+
+	/**
+	 * Overload that lets a caller supply a custom {@link PdfEntryDecoder}
+	 * (e.g. a recording double in tests). Production wiring uses the
+	 * three-argument overload.
+	 */
+	public ArchiveExtractionService(ZipArchiveValidator validator, MinioObjectStorage storage,
+			UploadLimitsProperties limits, PdfEntryDecoder decoder) {
 		this.validator = Objects.requireNonNull(validator, "validator must not be null");
 		this.storage = Objects.requireNonNull(storage, "storage must not be null");
 		this.limits = Objects.requireNonNull(limits, "limits must not be null");
+		this.decoder = Objects.requireNonNull(decoder, "decoder must not be null");
 	}
 
 	/**
@@ -111,11 +133,13 @@ public class ArchiveExtractionService {
 				if (entry.isDirectory()) {
 					continue;
 				}
-				ExtractedPdf extracted = extractOne(zipFile, entry, sequence, posRecordId, sourceByteCount,
+				ExtractedResult result = extractOne(zipFile, entry, sequence, posRecordId, sourceByteCount,
 						cumulativeExpanded);
-				out.add(extracted);
-				uploaded.add(extracted);
-				cumulativeExpanded += extracted.byteSize();
+				out.add(result.pdf());
+				uploaded.add(result.pdf());
+				// Cumulative security accounting uses the raw uncompressed
+				// entry bytes, including the 27-byte wrapper when present.
+				cumulativeExpanded += result.sourceEntryBytes();
 				sequence++;
 			}
 		}
@@ -179,7 +203,7 @@ public class ArchiveExtractionService {
 		}
 	}
 
-	private ExtractedPdf extractOne(ZipFile zipFile, ZipEntry entry, int sequence, UUID posRecordId,
+	private ExtractedResult extractOne(ZipFile zipFile, ZipEntry entry, int sequence, UUID posRecordId,
 			long sourceByteCount, long cumulativeExpandedBefore) {
 		UUID documentId = DocumentIdentityDeriver.deriveDocumentId(posRecordId, sequence);
 		UUID storageObjectId = DocumentIdentityDeriver.deriveStorageObjectId(documentId);
@@ -208,10 +232,9 @@ public class ArchiveExtractionService {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
 		}
 
-		long byteCount;
-		String sha256;
+		NormalizedPdf normalized;
 		try (InputStream in = zipFile.getInputStream(entry)) {
-			byteCount = streamPdfWithLimits(in, tempPdf, cumulativeExpandedBefore, sourceByteCount);
+			normalized = streamNormalizedPdf(in, tempPdf, cumulativeExpandedBefore, sourceByteCount);
 		}
 		catch (ConsumerException e) {
 			deleteQuietly(tempPdf);
@@ -222,10 +245,9 @@ public class ArchiveExtractionService {
 			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
 		}
 
-		// Re-validate magic on disk so a stream-only-validated entry that
-		// happened to start with %PDF- but corrupt later bytes is still
-		// rejected. The stream write wrote exactly byteCount bytes, so
-		// the file size equals byteCount.
+		// Re-validate that the normalized temp file begins with %PDF- (byte
+		// zero). The decoder already guarantees this, but a second on-disk
+		// check is cheap defense-in-depth before upload.
 		try {
 			verifyPdfMagic(tempPdf);
 		}
@@ -233,18 +255,13 @@ public class ArchiveExtractionService {
 			deleteQuietly(tempPdf);
 			throw e;
 		}
-		sha256 = sha256OfFile(tempPdf);
-		if (sha256 == null) {
-			deleteQuietly(tempPdf);
-			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE);
-		}
 
-		// Always upload so the bucket reflects the verified immutable
-		// source archive. Pre-existence was already probed; the flag on
-		// ExtractedPdf tells compensation to skip deletion of a key
-		// that existed before this attempt.
+		// Always upload the normalized PDF so the bucket reflects the verified
+		// immutable source archive. Pre-existence was already probed; the flag
+		// on ExtractedPdf tells compensation to skip deletion of a key that
+		// existed before this attempt.
 		try (InputStream in = Files.newInputStream(tempPdf)) {
-			this.storage.put(objectKey, in, byteCount, PDF_CONTENT_TYPE);
+			this.storage.put(objectKey, in, normalized.normalizedBytes(), PDF_CONTENT_TYPE);
 		}
 		catch (IOException e) {
 			deleteQuietly(tempPdf);
@@ -257,11 +274,12 @@ public class ArchiveExtractionService {
 		deleteQuietly(tempPdf);
 
 		Instant now = Instant.now();
-		return new ExtractedPdf(documentId, storageObjectId, objectKey, filenameSegment, byteCount, sha256,
-				sequence, wasPreExisting, now);
+		ExtractedPdf pdf = new ExtractedPdf(documentId, storageObjectId, objectKey, filenameSegment,
+				normalized.normalizedBytes(), normalized.sha256(), sequence, wasPreExisting, now);
+		return new ExtractedResult(pdf, normalized.sourceEntryBytes());
 	}
 
-	private long streamPdfWithLimits(InputStream in, Path tempPdf, long cumulativeExpandedBefore,
+	private NormalizedPdf streamNormalizedPdf(InputStream in, Path tempPdf, long cumulativeExpandedBefore,
 			long sourceByteCount) {
 		MessageDigest digest;
 		try {
@@ -271,77 +289,52 @@ public class ArchiveExtractionService {
 			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
 		}
 
-		long bytesRead = 0L;
-		byte[] magic = new byte[PDF_MAGIC_LEN];
-		try (var out = Files.newOutputStream(tempPdf,
-				StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
-			int magicRead = 0;
-			while (magicRead < PDF_MAGIC_LEN) {
-				int r = in.read(magic, magicRead, PDF_MAGIC_LEN - magicRead);
-				if (r == -1) {
-					throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
-				}
-				magicRead += r;
+		PdfEntryDecoder.DecodeResult result;
+		try (OutputStream fileOut = Files.newOutputStream(tempPdf,
+				StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+				DigestOutputStream out = new DigestOutputStream(fileOut, digest)) {
+			try {
+				// Enforce the *remaining* effective raw-byte allowance — the
+				// minimum of the per-entry cap, the remaining total-uncompressed
+				// budget, and the remaining compression-ratio budget — during
+				// streaming, mirroring the validator's pre-entry arithmetic. An
+				// entry that would breach a cumulative limit is therefore
+				// rejected at the first over-limit chunk, not after the whole
+				// entry has been written to the temp file.
+				long effectiveRawAllowance = this.validator.effectiveEntryLimit(cumulativeExpandedBefore,
+						sourceByteCount);
+				result = this.decoder.decode(in, out, effectiveRawAllowance);
 			}
-			if (magic[0] != '%' || magic[1] != 'P' || magic[2] != 'D' || magic[3] != 'F' || magic[4] != '-') {
-				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
-			}
-			bytesRead += magicRead;
-			if (bytesRead > this.limits.maxEntryBytes()) {
-				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
-			}
-			// Cumulative expanded budget: a single entry's worth of
-			// bytes must fit; the running total must also fit.
-			if (cumulativeExpandedBefore + bytesRead > this.limits.maxUncompressedBytes()) {
-				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
-			}
-			out.write(magic, 0, magicRead);
-			digest.update(magic, 0, magicRead);
-
-			byte[] buffer = new byte[BUFFER_SIZE];
-			int read;
-			while ((read = in.read(buffer)) != -1) {
-				bytesRead += read;
-				if (bytesRead > this.limits.maxEntryBytes()) {
-					throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
-				}
-				if (cumulativeExpandedBefore + bytesRead > this.limits.maxUncompressedBytes()) {
-					throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
-				}
-				out.write(buffer, 0, read);
-				digest.update(buffer, 0, read);
+			catch (ArchiveValidationException e) {
+				// A malformed or unrecognized entry (or an exhausted cumulative
+				// budget) is a permanent source-archive failure, not a transient
+				// one.
+				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID, e);
 			}
 		}
 		catch (IOException e) {
-			throw new ConsumerException(ConsumerException.Code.EXTRACTION_TRANSIENT_FAILURE, e);
+			throw new ConsumerException(ConsumerException.Code.SOURCE_STORAGE_UNAVAILABLE, e);
 		}
 
-		// Effective compression ratio: bytes-actually-read vs compressed
-		// source. We check after the entry is fully read so the bound
-		// reflects the on-the-wire ratio, not a streaming estimate.
+		long sourceEntryBytes = result.sourceBytesRead();
+		long normalizedBytes = result.pdfBytesWritten();
+
+		// Defense-in-depth post-stream assertions. The decoder already enforced
+		// the effective allowance during the read (above), so these should only
+		// ever trip on a logic bug; they are kept so a future refactor cannot
+		// silently relax the caps. Raw bytes include the 27-byte wrapper for the
+		// serialized form.
+		if (cumulativeExpandedBefore + sourceEntryBytes > this.limits.maxUncompressedBytes()) {
+			throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
+		}
 		if (sourceByteCount > 0L) {
-			long totalExpanded = cumulativeExpandedBefore + bytesRead;
+			long totalExpanded = cumulativeExpandedBefore + sourceEntryBytes;
 			long observedRatio = (totalExpanded + sourceByteCount - 1L) / sourceByteCount; // ceil division
 			if (observedRatio > this.limits.maxCompressionRatio()) {
 				throw new ConsumerException(ConsumerException.Code.SOURCE_ARCHIVE_INVALID);
 			}
 		}
-		return bytesRead;
-	}
-
-	private static String sha256OfFile(Path file) {
-		try (InputStream in = Files.newInputStream(file)) {
-			MessageDigest digest = MessageDigest.getInstance("SHA-256");
-			byte[] buffer = new byte[BUFFER_SIZE];
-			int read;
-			while ((read = in.read(buffer)) != -1) {
-				digest.update(buffer, 0, read);
-			}
-			return hexLowercase(digest.digest());
-		}
-		catch (IOException | NoSuchAlgorithmException e) {
-			return null;
-		}
+		return new NormalizedPdf(normalizedBytes, sourceEntryBytes, hexLowercase(digest.digest()));
 	}
 
 	private static void verifyPdfMagic(Path file) {
@@ -398,6 +391,23 @@ public class ArchiveExtractionService {
 			// Best-effort cleanup; the next run will overwrite the
 			// temp file via TRUNCATE_EXISTING.
 		}
+	}
+
+	/**
+	 * Internal result of streaming one entry through the decoder: the
+	 * normalized PDF byte count, the raw source-entry byte count (including
+	 * the 27-byte wrapper when present), and the SHA-256 of the normalized
+	 * PDF bytes.
+	 */
+	private record NormalizedPdf(long normalizedBytes, long sourceEntryBytes, String sha256) {
+	}
+
+	/**
+	 * Per-entry extraction result: the public/persisted {@link ExtractedPdf}
+	 * (whose byte size is the normalized size) plus the raw source-entry byte
+	 * count used for cumulative security-limit accounting.
+	 */
+	private record ExtractedResult(ExtractedPdf pdf, long sourceEntryBytes) {
 	}
 
 	/**
