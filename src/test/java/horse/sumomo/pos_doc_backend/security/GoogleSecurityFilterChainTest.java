@@ -31,6 +31,7 @@ import com.yourcompany.pos.api.model.StorageObjectSummary;
 
 import horse.sumomo.pos_doc_backend.content.ContentDescriptor;
 import horse.sumomo.pos_doc_backend.content.DocumentContentService;
+import horse.sumomo.pos_doc_backend.content.SearchPageArchiveService;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosDocumentListService;
 import horse.sumomo.pos_doc_backend.review.IngestionJobReadService;
@@ -92,6 +93,29 @@ class GoogleSecurityFilterChainTest {
 	private IngestionJobReadService ingestionJobReadService;
 	@MockitoBean
 	private DocumentContentService contentService;
+	@MockitoBean
+	private SearchPageArchiveService pageArchiveService;
+
+	@Test
+	void searchPageArchiveRequiresReviewerAndCsrf() throws Exception {
+		String ids = "[\"" + POS_ID + "\"]";
+		this.mockMvc.perform(post("/pos-records/search-page-archive")
+				.contentType(MediaType.APPLICATION_JSON).content(ids).with(OidcTestAuth.oidc(VIEWER, false)).with(csrf()))
+				.andExpect(status().isForbidden());
+		this.mockMvc.perform(post("/pos-records/search-page-archive")
+				.contentType(MediaType.APPLICATION_JSON).content(ids).with(OidcTestAuth.oidc(REVIEWER, true)))
+				.andExpect(status().isForbidden());
+		Path archive = Files.createTempFile("search-page-security-test", ".zip");
+		byte[] zipBytes = {0x50, 0x4b, 0x05, 0x06};
+		Files.write(archive, zipBytes);
+		when(pageArchiveService.create(List.of(POS_ID))).thenReturn(archive);
+		this.mockMvc.perform(post("/pos-records/search-page-archive")
+				.contentType(MediaType.APPLICATION_JSON).content(ids).with(OidcTestAuth.oidc(REVIEWER, true)).with(csrf()))
+				.andExpect(status().isOk())
+				.andExpect(header().string("Content-Disposition", "attachment; filename=pos-search-page.zip"))
+				.andExpect(content().bytes(zipBytes));
+		assertTrue(Files.notExists(archive));
+	}
 
 	@DynamicPropertySource
 	static void sqliteUrl(DynamicPropertyRegistry registry) throws Exception {

@@ -152,6 +152,48 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /pos-records/search-page-archive:
+    post:
+      tags: [POS records]
+      operationId: downloadSearchPageArchive
+      summary: Download extracted PDFs for the displayed search page
+      description: |
+        Reviewer only. Accepts the displayed page's ordered record IDs (1 to 20).
+        Returns 409 if a selected record has disappeared or lacks an eRef number.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              maxItems: 20
+              items:
+                type: string
+                format: uuid
+      responses:
+        '200':
+          description: ZIP containing one eRef folder per record and its extracted PDFs.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /pos-records/{posRecordId}:
     parameters:
       - $ref: '#/components/parameters/PosRecordId'
@@ -660,10 +702,15 @@ components:
           minLength: 1
           maxLength: 256
           pattern: '.*\S.*'
+        consultantName:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '.*\S.*'
         fuzzyName:
           type: boolean
           default: true
-          description: Apply trigram similarity to policyholderName when present.
+          description: Apply trigram similarity to both supplied name filters.
         minimumNameSimilarity:
           type: number
           format: double
