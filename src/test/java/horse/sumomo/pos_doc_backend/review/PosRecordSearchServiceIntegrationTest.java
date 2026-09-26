@@ -152,6 +152,32 @@ class PosRecordSearchServiceIntegrationTest {
 				record.getId()));
 	}
 
+	@Test
+	void consultantAndPolicyholderFiltersUseSharedFuzzyModeAndPageTogether() {
+		PosRecordEntity first = rec("Jane Tan", RR, T(1), T(1));
+		first.setConsultantName("Avery   Tan");
+		this.posRecordRepository.saveAndFlush(first);
+		PosRecordEntity second = rec("Jane Tan", RR, T(2), T(2));
+		second.setConsultantName("Avery Tan");
+		this.posRecordRepository.saveAndFlush(second);
+		PosRecordEntity wrongHolder = rec("Morgan Chen", RR, T(3), T(3));
+		wrongHolder.setConsultantName("Avery Tan");
+		this.posRecordRepository.saveAndFlush(wrongHolder);
+		PosRecordSearchRequest exact = new PosRecordSearchRequest().policyholderName(" JANE TAN ")
+				.consultantName("AVERY TAN").fuzzyName(false).size(1);
+		PosRecordSearchPage page0 = this.searchService.search(exact.page(0));
+		PosRecordSearchPage page1 = this.searchService.search(exact.page(1));
+		assertEquals(2, page0.getTotalElements());
+		assertEquals(2, page0.getTotalPages());
+		assertEquals(List.of(second.getId()), ids(page0));
+		assertEquals(List.of(first.getId()), ids(page1));
+		assertFalse(contains(page0, wrongHolder.getId()));
+		assertEquals(0, this.searchService.search(new PosRecordSearchRequest()
+				.policyholderName("Jane Tanx").consultantName("Avery Tan").fuzzyName(false)).getTotalElements());
+		assertEquals(2, this.searchService.search(new PosRecordSearchRequest()
+				.policyholderName("Jane Tanx").consultantName("Avery Tann").fuzzyName(true)).getTotalElements());
+	}
+
 	// ------------------------------------------------------------------
 	// 5: fuzzy misspelling passes low threshold, fails high
 	// ------------------------------------------------------------------

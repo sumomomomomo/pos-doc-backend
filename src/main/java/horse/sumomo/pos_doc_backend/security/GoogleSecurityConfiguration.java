@@ -165,6 +165,9 @@ public class GoogleSecurityConfiguration {
 	}
 
 	private static boolean isWrite(String path, String method) {
+		if (path.equals("/pos-records/search-page-archive") && method.equals("POST")) {
+			return true;
+		}
 		if (path.equals("/pos-records") && method.equals("POST")) {
 			return true;
 		}

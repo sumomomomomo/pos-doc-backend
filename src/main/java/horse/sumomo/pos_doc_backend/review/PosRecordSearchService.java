@@ -66,7 +66,8 @@ public class PosRecordSearchService {
 		String erefNorm = normalizeFilter(request.getErefNumber(), false);
 		String policyNorm = normalizeFilter(request.getPolicyNumber(), false);
 		String nameNorm = normalizeFilter(request.getPolicyholderName(), true);
-		boolean nameQuery = nameNorm != null;
+		String consultantNorm = normalizeFilter(request.getConsultantName(), true);
+		boolean nameQuery = nameNorm != null || consultantNorm != null;
 
 		List<PosRecordStatus> statusFilter = null;
 		if (request.getStatuses() != null && !request.getStatuses().isEmpty()) {
@@ -81,15 +82,21 @@ public class PosRecordSearchService {
 		List<Candidate> rows = new ArrayList<>();
 		for (PosRecordEntity entity : candidates) {
 			double score = 0.0;
-			if (nameQuery) {
+			if (nameNorm != null) {
 				String holderNorm = entity.getPolicyholderNameNormalized();
-				if (holderNorm != null) {
-					score = fuzzy ? TrigramSimilarity.similarity(nameNorm, holderNorm)
-							: (nameNorm.equals(holderNorm) ? 1.0 : 0.0);
-				}
-				if (score < threshold) {
+				if (holderNorm == null || (!fuzzy && !nameNorm.equals(holderNorm))) {
 					continue;
 				}
+				score = fuzzy ? TrigramSimilarity.similarity(nameNorm, holderNorm) : 1.0;
+				if (fuzzy && score < threshold) continue;
+			}
+			if (consultantNorm != null) {
+				String value = entity.getConsultantName();
+				String normalized = value == null || value.isBlank() ? null : MetadataNormalizer.normalizeName(value);
+				if (normalized == null || (!fuzzy && !consultantNorm.equals(normalized))) continue;
+				double consultantScore = fuzzy ? TrigramSimilarity.similarity(consultantNorm, normalized) : 1.0;
+				if (fuzzy && consultantScore < threshold) continue;
+				score = nameNorm == null ? consultantScore : (score + consultantScore) / 2;
 			}
 			rows.add(new Candidate(entity, score));
 		}

@@ -22,6 +22,7 @@ import com.yourcompany.pos.api.model.Problem;
 import com.yourcompany.pos.api.model.ProblemFieldErrorsInner;
 
 import horse.sumomo.pos_doc_backend.content.DocumentContentException;
+import horse.sumomo.pos_doc_backend.content.SearchPageArchiveException;
 import horse.sumomo.pos_doc_backend.ingestion.archive.ArchiveValidationException;
 import horse.sumomo.pos_doc_backend.ingestion.application.IntakeException;
 import horse.sumomo.pos_doc_backend.review.PosRecordApiException;
@@ -64,6 +65,12 @@ public class ApiExceptionHandler {
 		DocumentContentException.Code code = e.getCode();
 		log.warn("Request rejected (category={})", code.code());
 		return problem(code.httpStatus(), code.code(), code.detail());
+	}
+
+	@ExceptionHandler(SearchPageArchiveException.class)
+	public ResponseEntity<Problem> handleSearchPageArchive(SearchPageArchiveException e) {
+		var code = e.getCode();
+		return problem(code.status, code.code, code.detail);
 	}
 
 	@ExceptionHandler(AuthRequiredException.class)

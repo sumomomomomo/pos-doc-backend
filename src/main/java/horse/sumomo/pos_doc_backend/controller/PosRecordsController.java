@@ -2,6 +2,8 @@ package horse.sumomo.pos_doc_backend.controller;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
@@ -30,6 +32,7 @@ import com.yourcompany.pos.api.model.VerifyPosRecordRequest;
 import horse.sumomo.pos_doc_backend.content.ContentDescriptor;
 import horse.sumomo.pos_doc_backend.content.DocumentContentException;
 import horse.sumomo.pos_doc_backend.content.DocumentContentService;
+import horse.sumomo.pos_doc_backend.content.SearchPageArchiveService;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosArchiveIntakeService;
 import horse.sumomo.pos_doc_backend.ingestion.application.PosDocumentListService;
 import horse.sumomo.pos_doc_backend.ingestion.application.UploadResult;
@@ -60,6 +63,7 @@ public class PosRecordsController implements PosRecordsApi {
 	private final PosRecordSearchService searchService;
 	private final PosRecordCommandService commandService;
 	private final DocumentContentService contentService;
+	private final SearchPageArchiveService pageArchiveService;
 
 	/**
 	 * Servlet context path, used to build the external {@code Location}
@@ -73,6 +77,7 @@ public class PosRecordsController implements PosRecordsApi {
 			PosRecordSearchService searchService,
 			PosRecordCommandService commandService,
 			DocumentContentService contentService,
+			SearchPageArchiveService pageArchiveService,
 			@Value("${server.servlet.context-path:/api/v1}") String contextPath) {
 		this.intakeService = intakeService;
 		this.documentListService = documentListService;
@@ -80,6 +85,7 @@ public class PosRecordsController implements PosRecordsApi {
 		this.searchService = searchService;
 		this.commandService = commandService;
 		this.contentService = contentService;
+		this.pageArchiveService = pageArchiveService;
 		this.contextPath = contextPath;
 	}
 
@@ -98,6 +104,28 @@ public class PosRecordsController implements PosRecordsApi {
 	@Override
 	public ResponseEntity<PosRecordSearchPage> searchPosRecords(PosRecordSearchRequest posRecordSearchRequest) {
 		return ResponseEntity.ok(this.searchService.search(posRecordSearchRequest));
+	}
+
+	@Override
+	public ResponseEntity<Resource> downloadSearchPageArchive(List<UUID> ids) {
+		Path archive = pageArchiveService.create(ids);
+		try {
+			HttpServletResponse response = ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes())
+					.getResponse();
+			response.setContentType("application/zip");
+			response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=pos-search-page.zip");
+			response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
+			response.setHeader("X-Content-Type-Options", "nosniff");
+			response.setContentLengthLong(Files.size(archive));
+			try (var input = Files.newInputStream(archive)) {
+				input.transferTo(response.getOutputStream());
+			}
+			return ResponseEntity.ok().build();
+		} catch (IOException e) {
+			throw new DocumentContentException(DocumentContentException.Code.DOCUMENT_STORAGE_UNAVAILABLE, e);
+		} finally {
+			try { Files.deleteIfExists(archive); } catch (IOException e) { log.warn("Could not delete page archive temp file"); }
+		}
 	}
 
 	@Override

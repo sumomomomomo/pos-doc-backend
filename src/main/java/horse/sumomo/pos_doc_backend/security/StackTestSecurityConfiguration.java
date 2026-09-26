@@ -42,6 +42,7 @@ public class StackTestSecurityConfiguration {
 				.requestMatchers("/actuator/health/**").permitAll()
 				.requestMatchers(HttpMethod.GET, "/pos-records/**").authenticated()
 				.requestMatchers(HttpMethod.POST, "/pos-records/search").authenticated()
+				.requestMatchers(HttpMethod.POST, "/pos-records/search-page-archive").hasRole("REVIEWER")
 				.requestMatchers(HttpMethod.GET, "/ingestion-jobs/**").authenticated()
 				.requestMatchers(HttpMethod.GET, "/auth/me").authenticated()
 				.requestMatchers(HttpMethod.POST, "/auth/logout").authenticated()
