@@ -20,7 +20,9 @@ import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.web.DefaultRedirectStrategy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
+import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.SimpleUrlAuthenticationFailureHandler;
 import org.springframework.security.web.authentication.SimpleUrlAuthenticationSuccessHandler;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
@@ -79,7 +81,8 @@ public class GoogleSecurityConfiguration {
 				.requireCsrfProtectionMatcher(allButSearchPost()))
 			.oauth2Login(oauth2 -> oauth2
 				.userInfoEndpoint(info -> info.oidcUserService(allowlistingOidcUserService(authorizer)))
-				.successHandler(frontendSuccessHandler(properties.postLoginRedirect())))
+				.successHandler(frontendSuccessHandler(properties.postLoginRedirect()))
+				.failureHandler(frontendFailureHandler(properties.postLoginRedirect())))
 			.logout(logout -> logout
 				.logoutRequestMatcher(isPost("/auth/logout"))
 				// The CsrfLogoutHandler added by the CSRF configurer clears the
@@ -300,6 +303,27 @@ public class GoogleSecurityConfiguration {
 		SimpleUrlAuthenticationSuccessHandler handler =
 				new SimpleUrlAuthenticationSuccessHandler(targetUrl);
 		handler.setAlwaysUseDefaultTargetUrl(true);
+		handler.setRedirectStrategy(redirectStrategy);
+		return handler;
+	}
+
+	/**
+	 * Failure handler that redirects a failed OAuth2 login back to the frontend
+	 * subpage with an error query parameter, so the user sees a friendly retry UI
+	 * instead of raw JSON from the authorization entry point.
+	 *
+	 * <p>Uses the same {@code contextRelative(true)} redirect strategy as
+	 * {@link #frontendSuccessHandler} to avoid prepending the backend's
+	 * {@code /api/v1} context path to the frontend destination.
+	 */
+	static AuthenticationFailureHandler frontendFailureHandler(String targetUrl) {
+		DefaultRedirectStrategy redirectStrategy = new DefaultRedirectStrategy();
+		redirectStrategy.setContextRelative(true);
+
+		String errorUrl = targetUrl + "?error=login_failed";
+
+		SimpleUrlAuthenticationFailureHandler handler =
+				new SimpleUrlAuthenticationFailureHandler(errorUrl);
 		handler.setRedirectStrategy(redirectStrategy);
 		return handler;
 	}
