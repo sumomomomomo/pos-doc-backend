@@ -1,4 +1,10 @@
-# Agent Workflow
+# Background Information
+
+This repo is deployed for production use on this frontend: https://github.com/sumomomomomo/sumomo-blog
+
+# Default Agent Workflow
+
+This is just a quick reference. If the user specifies otherwise, ignore the following instructions.
 
 1. Ingest a plan from `/plans/*.md` and implement it.
 2. Commit the changes (a new commit on top of the current HEAD).
